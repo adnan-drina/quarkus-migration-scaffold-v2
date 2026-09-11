@@ -1,0 +1,213 @@
+# decisions.yaml — the only human input to the migration (SOLUTION-ARCHITECTURE v3 §4).
+# Decided by the stage owner on 2026-09-08. Nothing here is written or inferred by a worker.
+schema: rhoai3.decisions/v2
+
+adrs:
+  - id: ADR-001
+    status: accepted
+    title: Destination platform is Red Hat build of Quarkus 3.27 on the Spring-compatibility path (BOM from .hermes/pins.json quarkus_platform)
+  - id: ADR-002
+    status: accepted
+    title: A cluster is deferred to a human after 3 rejected (reverted) attempts; the loop stops (admission MANUAL_CLUSTER, nothing mints) until the human clears it, and the run cannot close while it is open
+  - id: ADR-003
+    status: accepted
+    title: Retire the Spring AOP JMX call monitor (CallMonitoringAspect) — Quarkus documents no AOP compatibility, the aspect carries no business behavior and no parity observation; repository timing is a metrics-extension concern, not a migration obligation (pilot specimen spring-petclinic-rest, 2026-09-09)
+  - id: ADR-004
+    status: accepted
+    title: Persistence on Quarkus is the Spring Data JPA implementation (quarkus-spring-data-jpa, the legacy "spring-data-jpa" profile); the profile-selected JDBC ("jdbc") and plain-JPA ("jpa") repository implementations are retired — JdbcTemplate has no Quarkus compatibility, the plain-JPA set duplicates the Spring Data one, and no class outside those two packages references them (spring-petclinic-rest, decided 2026-09-10)
+  - id: ADR-005
+    status: accepted
+    title: The Spring Security configurer classes (WebSecurityConfigurerAdapter subclasses BasicAuthenticationConfig, DisableSecurityConfig) are retired; HTTP basic auth and the JDBC user store are re-established declaratively on Quarkus (quarkus-spring-security keeps the annotations; quarkus.http.auth.* and quarkus-security-jpa carry the store) as a later obligation; Roles stays (decided 2026-09-10)
+  - id: ADR-006
+    status: accepted
+    title: The springfox Swagger configuration (ApplicationSwaggerConfig) is retired; OpenAPI comes from quarkus-smallrye-openapi (compat-mapping remove_dependencies maps the springfox starter to it) (decided 2026-09-10)
+  - id: ADR-007
+    status: accepted
+    title: Retire the thirteen named Spring test-infrastructure sources in addition to the four implementation-test sources retired under ADR-004; retain ValidatorTests; record lost behavioural coverage and its source-recorded runtime replacements explicitly in M4 evidence; G-2 compares private field-name sets and G-3 compares remaining MTA findings, so neither measures test coverage, missing replacement evidence remains unverified, and restoring the suite with QuarkusTest and REST Assured remains a follow-up (spring-petclinic-rest, decided 2026-09-10)
+  - id: ADR-008
+    status: accepted
+    title: An Operator-owned and independently reviewed patch ports ValidatorTests to Jakarta Validation, preserving its English locale and real provider execution and restoring its pinned assertion dependency (operator-patches/spring-petclinic-rest); assertions, test inputs, selected subject, discovery and the validation call are unchanged, workers receive no test-source write authority, the intervention is recorded as an operator step with a named independent reviewer, and fresh successful Surefire execution of the ported test remains mandatory (spring-petclinic-rest, decided 2026-09-10)
+  - id: ADR-009
+    status: accepted
+    title: The destination runs on PostgreSQL 16 (registry.redhat.io/rhel9/postgresql-16, the supported image this environment already runs); the frozen source keeps its HSQLDB baseline and provenance, which is an engine CHANGE and is recorded as one - HSQLDB has no Quarkus JDBC extension on RHBQ 3.27, the source already ships PostgreSQL schema and seed assets and the destination already carries the PostgreSQL driver, and schema and seed stay owned by those source assets so the parity referent is the source's own dataset (spring-petclinic-rest, decided 2026-09-10)
+  - id: ADR-010
+    status: accepted
+    title: A build profile condition is retired ONE CONDITION AT A TIME, enumerated in build_profiles.retire as {path, type, member, annotation, profile} and bound to the type inventory it was proposed from (build_profiles.inventory_sha256); the rows are machine-proposed (propose-profile-retirement.py) and human-accepted, the bootstrap applies them before its annotation remapping and refuses a list that is unbound, bound to another inventory, or describes a condition this tree does not have, and M2 refuses any remaining condition over the destination's own source roots that the run neither activates nor enumerates - a blanket retire_gates flag retires nothing, because a retirement nobody can read is a deletion (decided 2026-09-11)
+  - id: ADR-011
+    status: accepted
+    title: The destination BUILDS with the profiles "prod,spring-data-jpa" (quarkus.profile). The legacy activated spring.profiles.active=hsqldb,spring-data-jpa and the fifteen surviving repository beans carry @IfBuildProfile("spring-data-jpa"); a destination that activates no profile has none of them, which is the shape the platform reports as a missing repository implementation. Retiring those conditions instead would also give the destination the beans - removing @IfBuildProfile makes a bean unconditional, it does not delete it - and is equally defensible; activation is chosen because it preserves the legacy selection semantics and edits no source. prod is kept because it is the profile ADR-009 names for the datasource and the platform default, so activating only the selection profile would silently replace it. hsqldb is NOT activated: ADR-009 moved the destination to PostgreSQL and the bootstrap renders that datasource unprefixed (decided 2026-09-11)
+
+destination_platform:
+  id: quarkus-rhbq-3.27   # key of .hermes/planning/catalogs/destination-platforms.json
+  adr: ADR-001
+
+thresholds:
+  max_attempts: 3         # rejected attempts on one cluster before it becomes a manual card
+  adr: ADR-002
+
+# The effective database of the destination (ADR-009). Resolved here, before a
+# worker reaches runtime verification: an absent or half-filled block keeps
+# admission INCONCLUSIVE, so nothing is minted against an undecided datasource.
+# Credentials are referenced by environment variable name and never recorded.
+# Which profiles the destination BUILDS with (ADR-011), and what it retires
+# instead (ADR-010). The platform resolves @IfBuildProfile at BUILD time, so a
+# profile nobody activates removes every bean gated on it -- measured on the v7
+# closeout: fifteen beans gone, reported one missing repository implementation
+# at a time for the whole run. Anything left unaccounted for is
+# BUILD_PROFILE_UNACCOUNTED at M2.
+build_profiles:
+  adr: ADR-011
+  active:
+    - prod
+    - spring-data-jpa
+  # retire: []          # ADR-010 rows, proposed by propose-profile-retirement.py
+  # inventory_sha256:   # stamped from the tree those rows were proposed against
+
+datasource:
+  adr: ADR-009
+  db_kind: postgresql
+  db_version: "16"
+  jdbc_extension: io.quarkus:quarkus-jdbc-postgresql
+  profile: prod
+  instance: petclinic-parity-postgres.wksp-ai-developer
+  jdbc_url_env: PETCLINIC_DB_URL
+  username_env: PETCLINIC_DB_USER
+  password_env: PETCLINIC_DB_PASSWORD
+  reset_procedure: .hermes/skills/gates/capture-source-oracles/scripts/reset-parity-db.sh --root . drops and recreates the public schema on the isolated instance, then applies schema_sql and seed_sql; every scenario run starts from exactly that state and the corpus records it as the initial state
+  schema_owner: source-assets
+  schema_sql: src/main/resources/db/postgresql/initDB.sql
+  seed_sql: src/main/resources/db/postgresql/populateDB.sql
+  hibernate_generation: none
+  source_baseline_db_kind: hsqldb
+
+# Work-list items an accepted ADR retires (exact item ids from
+# evidence/planning/worklist.json): one incident, one ADR, one reason.
+not_applicable: []
+
+# Source files an accepted ADR retires. The bootstrap deletes exactly these
+# and never imports them; a path the frozen legacy never had blocks
+# (RETIRED_SOURCE_MISSING). Pilot specimen: spring-petclinic-rest.
+retired_sources:
+  - path: src/main/java/org/springframework/samples/petclinic/util/CallMonitoringAspect.java
+    adr: ADR-003
+    reason: Spring AOP @Aspect + JMX @ManagedResource call timer over repositories; no Quarkus AOP compatibility; not observed by parity
+  - path: src/main/java/org/springframework/samples/petclinic/repository/jdbc/JdbcOwnerRepositoryImpl.java
+    adr: ADR-004
+    reason: profile "jdbc" repository implementation (JdbcTemplate / NamedParameterJdbcTemplate); no Quarkus compatibility; superseded by the Spring Data JPA implementation
+  - path: src/main/java/org/springframework/samples/petclinic/repository/jdbc/JdbcPet.java
+    adr: ADR-004
+    reason: profile "jdbc" repository implementation (JdbcTemplate / NamedParameterJdbcTemplate); no Quarkus compatibility; superseded by the Spring Data JPA implementation
+  - path: src/main/java/org/springframework/samples/petclinic/repository/jdbc/JdbcPetRepositoryImpl.java
+    adr: ADR-004
+    reason: profile "jdbc" repository implementation (JdbcTemplate / NamedParameterJdbcTemplate); no Quarkus compatibility; superseded by the Spring Data JPA implementation
+  - path: src/main/java/org/springframework/samples/petclinic/repository/jdbc/JdbcPetRowMapper.java
+    adr: ADR-004
+    reason: profile "jdbc" repository implementation (JdbcTemplate / NamedParameterJdbcTemplate); no Quarkus compatibility; superseded by the Spring Data JPA implementation
+  - path: src/main/java/org/springframework/samples/petclinic/repository/jdbc/JdbcPetTypeRepositoryImpl.java
+    adr: ADR-004
+    reason: profile "jdbc" repository implementation (JdbcTemplate / NamedParameterJdbcTemplate); no Quarkus compatibility; superseded by the Spring Data JPA implementation
+  - path: src/main/java/org/springframework/samples/petclinic/repository/jdbc/JdbcPetVisitExtractor.java
+    adr: ADR-004
+    reason: profile "jdbc" repository implementation (JdbcTemplate / NamedParameterJdbcTemplate); no Quarkus compatibility; superseded by the Spring Data JPA implementation
+  - path: src/main/java/org/springframework/samples/petclinic/repository/jdbc/JdbcSpecialtyRepositoryImpl.java
+    adr: ADR-004
+    reason: profile "jdbc" repository implementation (JdbcTemplate / NamedParameterJdbcTemplate); no Quarkus compatibility; superseded by the Spring Data JPA implementation
+  - path: src/main/java/org/springframework/samples/petclinic/repository/jdbc/JdbcUserRepositoryImpl.java
+    adr: ADR-004
+    reason: profile "jdbc" repository implementation (JdbcTemplate / NamedParameterJdbcTemplate); no Quarkus compatibility; superseded by the Spring Data JPA implementation
+  - path: src/main/java/org/springframework/samples/petclinic/repository/jdbc/JdbcVetRepositoryImpl.java
+    adr: ADR-004
+    reason: profile "jdbc" repository implementation (JdbcTemplate / NamedParameterJdbcTemplate); no Quarkus compatibility; superseded by the Spring Data JPA implementation
+  - path: src/main/java/org/springframework/samples/petclinic/repository/jdbc/JdbcVisitRepositoryImpl.java
+    adr: ADR-004
+    reason: profile "jdbc" repository implementation (JdbcTemplate / NamedParameterJdbcTemplate); no Quarkus compatibility; superseded by the Spring Data JPA implementation
+  - path: src/main/java/org/springframework/samples/petclinic/repository/jdbc/JdbcVisitRowMapper.java
+    adr: ADR-004
+    reason: profile "jdbc" repository implementation (JdbcTemplate / NamedParameterJdbcTemplate); no Quarkus compatibility; superseded by the Spring Data JPA implementation
+  - path: src/main/java/org/springframework/samples/petclinic/repository/jdbc/package-info.java
+    adr: ADR-004
+    reason: profile "jdbc" repository implementation (JdbcTemplate / NamedParameterJdbcTemplate); no Quarkus compatibility; superseded by the Spring Data JPA implementation
+  - path: src/main/java/org/springframework/samples/petclinic/repository/jpa/JpaOwnerRepositoryImpl.java
+    adr: ADR-004
+    reason: profile "jpa" repository implementation (EntityManager); duplicates the Spring Data JPA implementation the destination keeps
+  - path: src/main/java/org/springframework/samples/petclinic/repository/jpa/JpaPetRepositoryImpl.java
+    adr: ADR-004
+    reason: profile "jpa" repository implementation (EntityManager); duplicates the Spring Data JPA implementation the destination keeps
+  - path: src/main/java/org/springframework/samples/petclinic/repository/jpa/JpaPetTypeRepositoryImpl.java
+    adr: ADR-004
+    reason: profile "jpa" repository implementation (EntityManager); duplicates the Spring Data JPA implementation the destination keeps
+  - path: src/main/java/org/springframework/samples/petclinic/repository/jpa/JpaSpecialtyRepositoryImpl.java
+    adr: ADR-004
+    reason: profile "jpa" repository implementation (EntityManager); duplicates the Spring Data JPA implementation the destination keeps
+  - path: src/main/java/org/springframework/samples/petclinic/repository/jpa/JpaUserRepositoryImpl.java
+    adr: ADR-004
+    reason: profile "jpa" repository implementation (EntityManager); duplicates the Spring Data JPA implementation the destination keeps
+  - path: src/main/java/org/springframework/samples/petclinic/repository/jpa/JpaVetRepositoryImpl.java
+    adr: ADR-004
+    reason: profile "jpa" repository implementation (EntityManager); duplicates the Spring Data JPA implementation the destination keeps
+  - path: src/main/java/org/springframework/samples/petclinic/repository/jpa/JpaVisitRepositoryImpl.java
+    adr: ADR-004
+    reason: profile "jpa" repository implementation (EntityManager); duplicates the Spring Data JPA implementation the destination keeps
+  - path: src/main/java/org/springframework/samples/petclinic/repository/jpa/package-info.java
+    adr: ADR-004
+    reason: profile "jpa" repository implementation (EntityManager); duplicates the Spring Data JPA implementation the destination keeps
+  - path: src/main/java/org/springframework/samples/petclinic/security/BasicAuthenticationConfig.java
+    adr: ADR-005
+    reason: extends WebSecurityConfigurerAdapter (@EnableWebSecurity, JDBC user store, BCrypt); Spring Security configurer classes have no Quarkus compatibility; re-established declaratively
+  - path: src/main/java/org/springframework/samples/petclinic/security/DisableSecurityConfig.java
+    adr: ADR-005
+    reason: extends WebSecurityConfigurerAdapter (permit-all when petclinic.security.enable=false); same
+  - path: src/main/java/org/springframework/samples/petclinic/util/ApplicationSwaggerConfig.java
+    adr: ADR-006
+    reason: springfox BeanPostProcessor / Docket configuration; springfox is Spring MVC only; quarkus-smallrye-openapi replaces it
+  - path: src/test/java/org/springframework/samples/petclinic/service/clinicService/ClinicServiceJdbcTests.java
+    adr: ADR-004
+    reason: exercises a repository implementation ADR-004 retired; a test of retired code is retired with it
+  - path: src/test/java/org/springframework/samples/petclinic/service/userService/UserServiceJdbcTests.java
+    adr: ADR-004
+    reason: exercises a repository implementation ADR-004 retired; a test of retired code is retired with it
+  - path: src/test/java/org/springframework/samples/petclinic/service/clinicService/ClinicServiceJpaTests.java
+    adr: ADR-004
+    reason: exercises a repository implementation ADR-004 retired; a test of retired code is retired with it
+  - path: src/test/java/org/springframework/samples/petclinic/service/userService/UserServiceJpaTests.java
+    adr: ADR-004
+    reason: exercises a repository implementation ADR-004 retired; a test of retired code is retired with it
+  - path: src/test/java/org/springframework/samples/petclinic/service/clinicService/ClinicServiceSpringDataJpaTests.java
+    adr: ADR-007
+    reason: @SpringBootTest + @ActiveProfiles: boots a Spring application context, which the compat path does not provide
+  - path: src/test/java/org/springframework/samples/petclinic/service/userService/UserServiceSpringDataJpaTests.java
+    adr: ADR-007
+    reason: @SpringBootTest + @ActiveProfiles: same
+  - path: src/test/java/org/springframework/samples/petclinic/service/clinicService/AbstractClinicServiceTests.java
+    adr: ADR-007
+    reason: @ContextConfiguration + @Autowired + Spring @Transactional in a test; every subclass is retired
+  - path: src/test/java/org/springframework/samples/petclinic/service/userService/AbstractUserServiceTests.java
+    adr: ADR-007
+    reason: @Autowired injection into a test; every subclass is retired
+  - path: src/test/java/org/springframework/samples/petclinic/SpringConfigTests.java
+    adr: ADR-007
+    reason: asserts the Spring application context wiring, which no longer exists
+  - path: src/test/java/org/springframework/samples/petclinic/service/clinicService/ApplicationTestConfig.java
+    adr: ADR-007
+    reason: @TestConfiguration from spring-boot-test; its only consumers are the retired controller tests
+  - path: src/test/java/org/springframework/samples/petclinic/rest/OwnerRestControllerTests.java
+    adr: ADR-007
+    reason: MockMvc standalone setup + @SpringBootTest + Spring Security test support; the documented Quarkus form is @QuarkusTest with REST Assured
+  - path: src/test/java/org/springframework/samples/petclinic/rest/PetRestControllerTests.java
+    adr: ADR-007
+    reason: MockMvc standalone setup + @SpringBootTest + Spring Security test support; the documented Quarkus form is @QuarkusTest with REST Assured
+  - path: src/test/java/org/springframework/samples/petclinic/rest/PetTypeRestControllerTests.java
+    adr: ADR-007
+    reason: MockMvc standalone setup + @SpringBootTest + Spring Security test support; the documented Quarkus form is @QuarkusTest with REST Assured
+  - path: src/test/java/org/springframework/samples/petclinic/rest/SpecialtyRestControllerTests.java
+    adr: ADR-007
+    reason: MockMvc standalone setup + @SpringBootTest + Spring Security test support; the documented Quarkus form is @QuarkusTest with REST Assured
+  - path: src/test/java/org/springframework/samples/petclinic/rest/UserRestControllerTests.java
+    adr: ADR-007
+    reason: MockMvc standalone setup + @SpringBootTest + Spring Security test support; the documented Quarkus form is @QuarkusTest with REST Assured
+  - path: src/test/java/org/springframework/samples/petclinic/rest/VetRestControllerTests.java
+    adr: ADR-007
+    reason: MockMvc standalone setup + @SpringBootTest + Spring Security test support; the documented Quarkus form is @QuarkusTest with REST Assured
+  - path: src/test/java/org/springframework/samples/petclinic/rest/VisitRestControllerTests.java
+    adr: ADR-007
+    reason: MockMvc standalone setup + @SpringBootTest + Spring Security test support; the documented Quarkus form is @QuarkusTest with REST Assured

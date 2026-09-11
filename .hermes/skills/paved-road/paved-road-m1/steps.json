@@ -1,0 +1,84 @@
+{
+  "kind": "m1-analyze",
+  "artifact": "m1-analyze",
+  "steps": [
+    {
+      "id": "freeze-migration-input",
+      "backing": "skill",
+      "skill": "freeze-migration-input",
+      "keep": [
+        "evidence/frozen/source-manifest.json",
+        "evidence/producers/freeze.json"
+      ],
+      "note": "The original frozen legacy source is the only baseline. derive-legacy-boot3 is not an M1 step."
+    },
+    {
+      "id": "capture-build-evidence",
+      "backing": "skill",
+      "skill": "capture-build-evidence",
+      "keep": [
+        "evidence/producers/build.json"
+      ]
+    },
+    {
+      "id": "inventory-legacy-surface",
+      "backing": "skill",
+      "skill": "inventory-legacy-surface",
+      "keep": [
+        "evidence/structure/structure.json",
+        "evidence/entry-point-inventory.json",
+        "evidence/type-inventory.json",
+        "evidence/producers/jdk-model.json"
+      ],
+      "note": "JDK-model extractor (javax.lang.model through JavacTask on the pinned toolchain JDK; unpinned or JDK mismatch refuses). Precedes scan-with-mta: the MTA handoff refuses without the inventory (AR-4.1)."
+    },
+    {
+      "id": "scan-with-mta",
+      "backing": "skill",
+      "skill": "scan-with-mta",
+      "keep": [
+        "evidence/mta-findings.json",
+        "evidence/findings-handoff.json",
+        "evidence/required-extensions.json",
+        "evidence/producers/mta.json"
+      ]
+    },
+    {
+      "id": "assemble-evidence-bundle",
+      "backing": "skill",
+      "skill": "assemble-evidence-bundle",
+      "producer": true,
+      "keep": [
+        "evidence/planning/evidence-bundle.json"
+      ]
+    },
+    {
+      "id": "capture-source-scenarios",
+      "backing": "skill",
+      "skill": "capture-source-oracles",
+      "keep": [
+        "verification/source-oracles/scenarios/_capture.json"
+      ],
+      "note": "Record what the SOURCE does, while the source is still the only thing that can say. scripts/capture-source-scenarios.py packages the frozen source, starts its isolated runtime, restores the initial state before each scenario that asks for it, replays the Operator-approved corpus (verification/scenarios/corpus.json) recording the state before and after each request, then captures the idempotent reads through that same runtime and stops what it started. No admission receipt is needed here: M1 precedes M2, so the capture binds to the evidence bundle. Idle when the corpus is absent, and it says so in its receipt (verification/source-oracles/scenarios/_capture.json): a missing corpus is a recorded gap, never an invented expectation and never silence. Nothing here reads the destination, and no worker ever sets an expected value."
+    },
+    {
+      "id": "kanban-attach",
+      "backing": "native",
+      "native": "kanban_attach.py",
+      "keep": [
+        "evidence/planning/evidence-bundle.json",
+        "evidence/findings-handoff.json",
+        "evidence/entry-point-inventory.json",
+        "evidence/type-inventory.json",
+        "evidence/required-extensions.json",
+        "evidence/mta-findings.json"
+      ]
+    },
+    {
+      "id": "dispatch-next-phase",
+      "backing": "native",
+      "native": "autostart-migration.sh",
+      "note": "Binds the platform-recorded pilot authorization to the bundle just produced and mints M2 (idempotent; mints nothing under a not-activated planner or an unfit bundle). The decision was the named human act of creating the workspace; this step only derives the binding, and admission still gates the plan."
+    }
+  ]
+}
