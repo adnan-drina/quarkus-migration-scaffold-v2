@@ -1,0 +1,2701 @@
+#!/usr/bin/env python3
+"""Print this card's brief: the only thing a worker edits.
+
+The brief is derived from the sealed work list (never written by a
+model): cluster id, kind, write set, and every item (rule / compiler
+code, line, detail). The cluster is this card's issued cluster
+(``verification/loop/issued.json`` when ``$HERMES_KANBAN_TASK`` matches,
+or ``--cluster``), not whatever the work-list head is after a bounce.
+Exit 0 with the brief; 1 when this card has no cluster to brief
+(``LOOP_WRONG_CARD`` / ``LOOP_CLUSTER_NOT_OPEN`` / ``LOOP_NO_OPEN_CLUSTER``).
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import json
+import sys
+import textwrap
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _loop_common import budget as _budget, candidate_sha256, ensure_hermes_lib, load_state, pending_for, product_paths_changed, verify_runs_for  # noqa: E402
+
+ensure_hermes_lib()
+from planner.canonical import load_json, write_canonical  # noqa: E402
+from planner.paths import LOOP_DIR, LOOP_ISSUED, MTA_FINDINGS, MTA_RESCAN_FINDINGS, VERIFY_RUN, WORKLIST, BOM_MANAGED, TYPE_INVENTORY  # noqa: E402
+from planner.worklist import OBJECTIVE_RULE  # noqa: E402
+import _outcome_bridge  # noqa: E402  outcome-board/v2: the issued contract this card owns
+import _typed_repair  # noqa: E402  V26-1: typed repair requests and records for the issued unit
+from planner.worklist import CHECKED_FAMILY_RULE, UNIT_KIND, UNIT_MAX_FILES, adapter_owned_annotations, assess_unit, handler_parameters, head_cluster, items_of  # noqa: E402
+
+# H5a: the ONE scope rule, stated once, the same words the M3 skill uses. It
+# replaces "never touch a path outside the write set" beside "add it with
+# amend-scope.py rather than blocking" -- two rules that sent v9 c:67bfc8d7483e
+# to the wrong file and then to a block.
+SCOPE_RULE = (
+    "Scope rule, for every parity item and for any runtime obligation whose producing file is outside the write set: "
+    "this card's write_set includes amendments already granted to THIS card; a file already listed needs no new amendment. "
+    "find the producing file (the item's locus_hints -- a body_diff's producer, a server_error's first product frame -- "
+    "name it), record it BEFORE editing it with amend-scope.py --root . --cluster <id> --card $HERMES_KANBAN_TASK "
+    "--path <file> --reason <why> --evidence parity:<item id> (bounded by the card's own bounds: two amendments, a "
+    "unit's four and never past its file bound), then edit it. The configuration file "
+    "(src/main/resources/application.properties) is amendable the same way when the obligation's advice names a "
+    "property that lives there (a navigation obligation: quarkus.swagger-ui.*); the fix is that property, never a "
+    "handler that serves a substitute page. kanban_block kind=needs_input ONLY when amend-scope.py "
+    "REFUSES (quote its REFUSE: SCOPE_AMENDMENT line) or when the fix is in a path the loop never grants: tests, "
+    "evidence/, decisions.yaml, a plugin or dependency the brief did not ask for. A path outside the amended write "
+    "set is reverted by advance.py."
+)
+
+# The evidence rule and the stop rule, stated once here and once in the M3
+# skill in the same words. v9 t_d280284d (OwnerRestController, 7 boundary
+# refusals): 84 tool calls, the controller read 4 times, 2 verifies, then the
+# last third of the hour on `mvn quarkus:dev` and curl -- a dev-profile build
+# that is not the measured artifact (ADR-011: the packaged build under the
+# declared profiles is).
+EVIDENCE_RULE = (
+    "Evidence rule: the measured artifact is the packaged application run-verify.sh builds under the declared build "
+    "profiles (decisions.yaml build_profiles) and starts exactly as the parity phase starts it. mvn quarkus:dev, a "
+    "dev-profile build, java -jar, or any server you start yourself is NOT evidence and must not be used (K2 refuses it "
+    "on a loop card): a dev build activates other beans and config than the packaged declared-profile build, so what it "
+    "shows is not what is measured. The ONLY way to observe the destination is run-verify.sh --mode acceptance: it "
+    "packages, starts, replays this card's scenarios and re-runs its read oracles, and leaves the verdicts, the "
+    "destination log and -- for a 5xx -- the exception under verification/parity; this brief is their digest."
+)
+
+STOP_RULE = (
+    "Stop rule: use verify_runs.acceptance_count and verify_runs.stop_rule_applies on THIS card; count and row n include "
+    "diagnostic runs, which do not spend acceptance runs. After two acceptance runs with the same obligations still reported, "
+    "stop exploring: write a typed diagnosis "
+    "-- what you changed, what each verify measured, the one hypothesis you could not test and the evidence that would "
+    "test it -- and kanban_block kind=needs_input carrying it. Do not run a third verify without a new edit. Never "
+    "start a server to explore."
+)
+
+READS_RULE = (
+    "Reads: this brief carries work-list advice, loci and catalog rows. Read a product file at most once per edit cycle. "
+    "For the current parity result, read verification/parity/_run.json: require its card/candidate binding and "
+    "receipt.composed_by_this_run, then inspect selected scenarios.results[].reason for status, headers, body, effects "
+    "and navigation. In status/body/effect differences written 'A vs B', A is the observed DESTINATION and B is the "
+    "expected SOURCE. Confirm that direction in the item's verdict_file: observed/expected for the response and "
+    "effects[].observed/effects[].expected for each read-back. A matching response status does not prove its effects. "
+    "A failed compile cannot establish new HTTP behaviour; check the latest verification/build/run.json and the "
+    "candidate binding before attributing a retained parity result to a new edit. "
+    "The brief does not replace these current comparison details. Older records in another mode or "
+    "directory are not this candidate's evidence."
+)
+
+# H9b (v9 t_2da2458b): the terminal tool's default timeout (180 s) killed a
+# 30 s advance.py after it had accepted; a second call refused; the worker
+# blocked an ACCEPTED card.
+ADVANCE_RULE = (
+    "advance.py rule: run it ONCE per verify, through the terminal tool with its `timeout` parameter set to 600 (the "
+    "tool's foreground maximum; the default 180 is not enough for a rebuild and a mint). It prints one `advance: ...` "
+    "progress line per phase, and the verdict line (OK: ACCEPTED / REVERTED / CONTINUE / VERIFICATION_PENDING / "
+    "DEFERRED) is on the record the moment it is printed. Follow an explicit verdict even when its exit code is "
+    "nonzero. For REFUSE/FAIL, resolve the named precondition before another acceptance call; an unchanged retry "
+    "does not repair stale verification. Retry the same invocation once only when interrupted or truncated with "
+    "no conclusive verdict, or read verification/loop/steps.json: a recorded acceptance/rejection is idempotent. "
+    "Never kanban_block a card whose step is "
+    "recorded accepted (K2 refuses it): kanban_complete is its terminator."
+)
+
+PROCEDURE = (
+    "Patch the write set one item at a time (targeted edits; never rewrite a whole file, never tests). "
+    + SCOPE_RULE + " " + EVIDENCE_RULE + " " + STOP_RULE + " " + READS_RULE + " " + ADVANCE_RULE
+    + " Each item names its rule, its advice (the rule's own guidance), "
+    "and for pom.xml the exact element at the reported line. An item whose advice names an artifact that is "
+    "already in the pom is marked advice_present: verify and move on, do not add it twice. A compile item "
+    "with already_imported: true is a classpath/API replacement, not a missing import — follow do_not; do "
+    "not add the same import again. For a "
+    "*Repository.java, inventory every method and repair the applicable ones together (one transformation); "
+    "compile-only is not an exit. Do not run extra mvn compile/test/verify beside run-verify.sh. "
+    "Optional --mode diagnostic is classpath + compiler only and cannot feed advance.py. Then run "
+    "run-verify.sh --mode acceptance and advance.py; the measure decides, not you. advance.py may answer "
+    "CONTINUE (exit 3) on a repair-family card: the candidate stays on the tree, no attempt is spent, and "
+    "you keep working THIS card on the members it names, then verify and advance again."
+)
+
+
+def pom_elements(pom_path: Path) -> list[dict]:
+    """Every <dependency>/<plugin>/<extension> element of a pom with its line
+    span and GAV, from the XML parser's own line numbers (no text matching)."""
+    import xml.parsers.expat
+
+    els: list[dict] = []
+    stack: list[dict] = []
+    parser = xml.parsers.expat.ParserCreate()
+
+    def start(name: str, _attrs: dict) -> None:
+        stack.append({"name": name, "line": parser.CurrentLineNumber, "children": {}, "text": ""})
+
+    def end(name: str) -> None:
+        el = stack.pop()
+        if stack and name in ("groupId", "artifactId", "version", "scope"):
+            stack[-1]["children"][name] = el["text"].strip()
+        if name in ("dependency", "plugin", "extension"):
+            c = el["children"]
+            els.append({"kind": name, "gav": "%s:%s" % (c.get("groupId", ""), c.get("artifactId", "")), "version": c.get("version", ""), "scope": c.get("scope", ""), "line_start": el["line"], "line_end": parser.CurrentLineNumber})
+
+    def chars(data: str) -> None:
+        if stack:
+            stack[-1]["text"] += data
+
+    parser.StartElementHandler = start
+    parser.EndElementHandler = end
+    parser.CharacterDataHandler = chars
+    try:
+        parser.Parse(pom_path.read_bytes(), True)
+    except xml.parsers.expat.ExpatError:
+        return []
+    return els
+
+
+def element_at(els: list[dict], line: int) -> dict | None:
+    hits = [e for e in els if e["line_start"] <= line <= e["line_end"]]
+    return min(hits, key=lambda e: e["line_end"] - e["line_start"]) if hits else None
+
+
+def _backticked(text: str) -> list[str]:
+    parts = text.split("`")
+    return [parts[i].strip() for i in range(1, len(parts), 2) if parts[i].strip()]
+
+
+def bom_managed(root: Path) -> set[str]:
+    """group:artifact ids the pinned BOM manages (probe-bom-managed.py), or empty when unprobed."""
+    p = root / BOM_MANAGED
+    if not p.is_file():
+        return set()
+    return {str(x) for x in (load_json(p).get("managed") or [])}
+
+
+def _later_line(r: dict) -> str:
+    """One later check as the schedule placed it: first measured at (card, milestone), after N prerequisite checks,
+    due at."""
+    e = r.get("earliest") if isinstance(r.get("earliest"), dict) else {}
+    at = [str(x).split(":", 2)[-1].rsplit(".", 1)[-1][:40] for x in (e.get("at") or [])][:2]
+    parts = ["%s -> due %s" % (r.get("check"), ", ".join(r.get("due") or ["M4"]))]
+    if at:
+        parts.append("first measured at %s%s" % (", ".join(at), (" (%s)" % e["milestone"]) if e.get("milestone") else ""))
+    if r.get("after"):
+        parts.append("after %d prerequisite check(s)" % len(r["after"]))
+    return "; ".join(parts)
+
+
+def _advice_shapes_of(root: Path) -> list:
+    """H-20/D-2: the source's exception-advice shapes from its frozen structural model ([] when unavailable)."""
+    try:
+        from planner.exception_advice import shapes_of_root
+    except ImportError:
+        return []
+    return shapes_of_root(root)
+
+
+def catalog(root: Path) -> dict:
+    p = root / ".hermes" / "planning" / "catalogs" / "compat-mapping.json"
+    return load_json(p) if p.is_file() else {}
+
+
+def _catalog_map(root: Path, key: str) -> dict[str, str]:
+    rows = catalog(root).get(key) or {}
+    return {k: str(v) for k, v in rows.items() if k != "note" and isinstance(v, str)}
+
+
+def artifact_aliases(root: Path) -> dict[str, str]:
+    """Documented renames from the bootstrap catalog (old group:artifact → managed group:artifact)."""
+    return _catalog_map(root, "artifact_aliases")
+
+
+def package_renames(root: Path) -> dict[str, str]:
+    """Documented Jakarta namespace renames (javax.* → jakarta.*)."""
+    return _catalog_map(root, "package_renames")
+
+
+_SYMBOL_RE = re.compile(r"symbol:\s+(class|variable|method|interface|enum)\s+([A-Za-z_$][\w$]*)")
+_PACKAGE_RE = re.compile(r"package ([\w.]+) does not exist")
+_LOCATION_RE = re.compile(r"location:\s+(?:class|interface|package)\s+([\w.$]+)")
+_PACKAGE_LOCATION_RE = re.compile(r"location:\s+package\s+([\w.]+)")
+REFERENCES_DIR = Path(".hermes") / "skills" / "migration" / "spring-to-quarkus-patterns" / "references"
+
+
+def rulesets_dir() -> Path | None:
+    home = os.environ.get("MTA_CLI_HOME") or "/opt/mta-cli"
+    d = Path(home) / "rulesets"
+    return d if d.is_dir() else None
+
+
+_RULE_CACHE: dict[str, str] = {}
+
+
+def rule_condition(rule_id: str) -> str:
+    """The `when:` block of an MTA rule, verbatim from the pinned rulesets: what
+    makes the incident appear, hence exactly what makes it disappear (an xpath
+    on the pom, a dependency name). Empty when the rulesets are not on this seat."""
+    if not rule_id:
+        return ""
+    if rule_id in _RULE_CACHE:
+        return _RULE_CACHE[rule_id]
+    d = rulesets_dir()
+    text = ""
+    if d is not None:
+        needle = "ruleID: " + rule_id
+        for f in sorted(d.rglob("*.yaml")):
+            try:
+                raw = f.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            if needle not in raw:
+                continue
+            lines = raw.splitlines()
+            start = next((i for i, ln in enumerate(lines) if ln.strip() == needle), -1)
+            if start < 0:
+                continue
+            # the rule item spans from its first key to the next list item at the same indent
+            item_indent = len(lines[start]) - len(lines[start].lstrip())
+            j = start
+            while j > 0 and not lines[j].lstrip().startswith("- ") and (len(lines[j]) - len(lines[j].lstrip())) >= item_indent - 2:
+                j -= 1
+            k = start + 1
+            while k < len(lines) and not (lines[k].lstrip().startswith("- ") and (len(lines[k]) - len(lines[k].lstrip())) <= item_indent - 2):
+                k += 1
+            block = lines[j:k]
+            w = next((i for i, ln in enumerate(block) if ln.strip() == "when:"), -1)
+            if w >= 0:
+                wi = len(block[w]) - len(block[w].lstrip())
+                out = [block[w]]
+                for ln in block[w + 1:]:
+                    if ln.strip() and (len(ln) - len(ln.lstrip())) <= wi:
+                        break
+                    out.append(ln)
+                text = textwrap.dedent("\n".join(out[:40]))
+            break
+    _RULE_CACHE[rule_id] = text
+    return text
+
+
+def load_inventory(root: Path) -> list[dict]:
+    p = root / TYPE_INVENTORY
+    if not p.is_file():
+        return []
+    rows = load_json(p).get("types") or []
+    return [r for r in rows if isinstance(r, dict) and r.get("fqn")]
+
+
+def _references(root: Path) -> list[tuple[Path, str]]:
+    d = root / REFERENCES_DIR
+    if not d.is_dir():
+        return []
+    return [(p, p.read_text(encoding="utf-8", errors="replace")) for p in sorted(d.glob("*.md"))]
+
+
+def reference_hits(refs: list[tuple[Path, str]], token: str, root: Path) -> list[str]:
+    """The reference files that mention the symbol or package by name, most mentions first."""
+    if not token:
+        return []
+    pat = re.compile(r"(?<![\w.])" + re.escape(token) + r"(?![\w])")
+    scored = [(len(pat.findall(text)), str(p.relative_to(root))) for p, text in refs]
+    return [path for n, path in sorted(scored, key=lambda x: (-x[0], x[1])) if n > 0][:3]
+
+
+def compile_advice(item: dict, root: Path, inventory: list[dict], renames: dict[str, str], refs: list[tuple[Path, str]],
+                   owned: dict[str, dict] | None = None, handlers: dict[str, dict] | None = None) -> dict:
+    """What the compiler said, and the facts the tools hold about the name it could not resolve:
+    the inventory row (a legacy type not yet in the destination tree), the documented Jakarta
+    rename for a javax.* package, the spring-to-quarkus-patterns reference that covers the symbol,
+    and, for an annotation a harness adapter owns (compat-mapping adapter_owned_annotations), the
+    retirement row's action as the item's first action; for a handler parameter type the stack does
+    not provide (compat-mapping handler_parameters.undocumented), that row's documented translation.
+    Both apply only to the QUALIFIED name: the file's explicit import (also the import a "package X
+    does not exist" diagnostic stands on), or the package javac names as the symbol's location."""
+    msg = str(item.get("message") or item.get("detail") or "")
+    out: dict = {"description": "compiler diagnostic", "message": msg}
+    sym = _SYMBOL_RE.search(msg)
+    pkg = _PACKAGE_RE.search(msg)
+    token = ""
+    if sym:
+        out["symbol"] = {"kind": sym.group(1), "name": sym.group(2)}
+        token = sym.group(2)
+        hits = [r for r in inventory if str(r["fqn"]).rsplit(".", 1)[-1] == token]
+        if hits:
+            r = hits[0]
+            dest = str(r.get("dest_file") or "")
+            out["inventory"] = {"fqn": r["fqn"], "layer": r.get("layer"), "legacy_file": r.get("legacy_file"), "dest_file": dest,
+                                "present_in_destination": bool(dest) and (root / dest).is_file()}
+    elif pkg:
+        token = pkg.group(1)
+        out["package"] = token
+        members = [r["fqn"] for r in inventory if str(r["fqn"]).startswith(token + ".")]
+        if members:
+            out["inventory_package"] = {"types": len(members), "present_in_destination": sorted(m for m in members if any((root / str(r.get("dest_file") or "x")).is_file() for r in inventory if r["fqn"] == m))[:5]}
+    # a bare symbol ("class Id") names its package only through the file's imports:
+    # `import javax.persistence.Id;` or `import javax.persistence.*;` binds the rename.
+    # An explicit import of the unresolved token (Spring BindingResult, UriInfo, …)
+    # is already_imported: adding it again cannot satisfy the diagnostic.
+    imported = ""
+    if sym:
+        src = root / str(item.get("path") or "")
+        if src.is_file():
+            exact = ""
+            wild = ""
+            for ln in src.read_text(encoding="utf-8", errors="replace").splitlines():
+                ln = ln.strip()
+                if not ln.startswith("import "):
+                    continue
+                spec = ln[len("import "):].rstrip(";").strip()
+                if spec.endswith("." + token):
+                    exact = spec
+                    break
+                if not wild and spec.endswith(".*"):
+                    head = spec.rsplit(".", 1)[0]
+                    if any(head == old or head.startswith(old + ".") for old in renames):
+                        wild = spec
+            imported = exact or wild
+        if imported:
+            out["imported_as"] = imported
+            out["already_imported"] = True
+    for old, new in renames.items():
+        if (pkg and token.startswith(old)) or (imported and (imported == old + "." + token or imported.startswith(old + "."))) \
+                or (sym and re.search(r"\b" + re.escape(old) + r"\.[\w.]*" + re.escape(token) + r"\b", msg)):
+            out["rename"] = {"from": old, "to": new}
+            break
+    hits = reference_hits(refs, token, root)
+    if hits:
+        out["references"] = hits
+    loc = _PACKAGE_LOCATION_RE.search(msg) if sym else None
+    qualified = imported if imported and not imported.endswith(".*") else ("%s.%s" % (loc.group(1), token) if loc else "")
+    if pkg and not qualified:
+        # "package X does not exist" reported AT an explicit import names that import's type
+        # (a wildcard import binds nothing, as for handler parameters)
+        src = root / str(item.get("path") or "")
+        line = int(item.get("line") or 0) if str(item.get("line") or "").isdigit() else 0
+        text = ""
+        if src.is_file() and line > 0:
+            lines = src.read_text(encoding="utf-8", errors="replace").splitlines()
+            text = lines[line - 1].strip() if line <= len(lines) else ""
+        m = re.match(r"import\s+([\w.]+)\s*;", text)
+        if m and m.group(1).startswith(token + ".") and not m.group(1).endswith(".*"):
+            qualified = m.group(1)
+    # a handler parameter type the selected stack does not provide: its compat-mapping
+    # handler_parameters row is the documented translation (v28 t_25819d9c and v26 Root17 were
+    # issued "package javax.servlet.http does not exist" / "cannot find symbol HttpServletResponse"
+    # with no action, while the row sat in the catalog and its recipe on another card)
+    hrow = (handlers or {}).get(qualified) if qualified else None
+    if hrow is not None and str(hrow.get("action") or "").strip():
+        gap = str(hrow.get("capability_gap") or "")
+        out["handler_translation"] = {"symbol": qualified, "catalog_row": {
+            "catalog": "compat-mapping.json", "block": "handler_parameters.undocumented", "key": qualified,
+            "source": str(hrow.get("source") or ""), "capability_gap": gap}}
+        out["first_action"] = str(hrow["action"])
+        out["do_not"] = ("Do not add this import again and do not search for another package: %s is not available on "
+                         "the selected stack. Apply the documented translation (first action)%s.%s"
+                         % (qualified, ("; any use it does not qualify is capability gap %s: block the card naming "
+                                        "it" % gap) if gap else "",
+                            (" Read the named references: %s." % ", ".join(hits)) if hits else ""))
+        return out
+    own = (owned or {}).get(qualified) if qualified else None
+    if own is not None:
+        out["retire"] = {"symbol": qualified, "action": str(own.get("action") or ""),
+                         "catalog_row": {"catalog": "compat-mapping.json", "block": "adapter_owned_annotations",
+                                         "key": qualified, "adapter": str(own.get("adapter") or ""),
+                                         "contract": str(own.get("contract") or ""), "source": str(own.get("source") or "")}}
+        out["first_action"] = out["retire"]["action"]
+        out["do_not"] = ("Do not add this import again and do not replace the annotation: its behaviour is owed to %s "
+                         "on its own parity card, never to this file." % out["retire"]["catalog_row"]["contract"])
+        return out
+    if out.get("already_imported"):
+        if out.get("rename"):
+            repl = "%s.%s" % (out["rename"]["to"], token) if not imported.endswith(".*") else out["rename"]["to"] + ".*"
+            out["do_not"] = ("Do not add this import again; it is already in the file. Replace %s with the "
+                             "documented rename %s." % (imported, repl))
+        else:
+            reference_action = ("Read the named references: %s. " % ", ".join(hits) if hits else
+                                "No matching reference is provided for this symbol. Use this card's qualified "
+                                "recipe or unit action if one is supplied; an empty search is not evidence of an API. ")
+            out["do_not"] = ("Do not add this import again; it is already in the file and the compiler cannot "
+                             "resolve it. An import alone does not establish classpath availability. " + reference_action +
+                             "Do not add a dependency or plugin the write set does not list.")
+    return out
+
+
+DECL_RE = re.compile(r"^\s*(?:@[\w.]+(?:\([^)]*\))?\s+)*[\w.<>,\[\]\s]+?\s+(\w+)\s*\(", re.M)
+# the same structured patterns the work list uses, read here from the message so
+# the brief helps whatever produced the item
+MEMBER_RES = (re.compile(r"Method '([A-Za-z_][A-Za-z0-9_]*)' of repository"),
+              re.compile(r"method '([A-Za-z_][A-Za-z0-9_]*)' of class"))
+
+
+def frozen_member_implementations(root: Path, member: str, limit: int = 2) -> list[dict]:
+    """How the FROZEN SOURCE implemented this member, with its query.
+
+    A retirement removes the code and the frozen copy keeps it: pilot v7's
+    repositories needed the JPQL that lived only in the JPA implementations
+    ADR-004 retired, could not see it, and invented @Query text that silenced
+    the build and meant nothing. This is the evidence that stops that."""
+    out: list[dict] = []
+    base = Path(root) / ".derived" / "frozen-input" / "src" / "main" / "java"
+    if not member or not base.is_dir():
+        return out
+    rx = re.compile(r"^.*\b%s\s*\(" % re.escape(member), re.M)
+    for f in sorted(base.rglob("*.java")):
+        text = f.read_text(encoding="utf-8", errors="replace")
+        m = rx.search(text)
+        if not m:
+            continue
+        lines = text.splitlines()
+        idx = text[: m.start()].count("\n")
+        body = "\n".join(lines[idx: idx + 12]).strip()
+        row = {"path": f.relative_to(Path(root) / ".derived" / "frozen-input").as_posix(), "snippet": body[:600]}
+        q = re.search(r'"(SELECT|UPDATE|DELETE|INSERT)\s[^"]{4,300}"', body, re.I)
+        if q:
+            row["query"] = q.group(0).strip('"')
+        out.append(row)
+        if len(out) >= limit:
+            break
+    # an implementation carrying a query is the one worth reading first
+    out.sort(key=lambda r: 0 if r.get("query") else 1)
+    return out
+
+
+def member_references(root: Path, member: str, exclude: str, limit: int = 3) -> list[dict]:
+    """Where else this member is declared in the destination's own sources,
+    with the lines around it (annotations included)."""
+    out: list[dict] = []
+    base = Path(root) / "src" / "main" / "java"
+    if not member or not base.is_dir():
+        return out
+    rx = re.compile(r"^.*\b%s\s*\(" % re.escape(member), re.M)
+    for f in sorted(base.rglob("*.java")):
+        rel = f.relative_to(root).as_posix()
+        if rel == exclude:
+            continue
+        text = f.read_text(encoding="utf-8", errors="replace")
+        m = rx.search(text)
+        if not m:
+            continue
+        lines = text.splitlines()
+        idx = text[: m.start()].count("\n")
+        snippet = "\n".join(lines[max(0, idx - 3): idx + 2]).strip()
+        out.append({"path": rel, "snippet": snippet[:400]})
+        if len(out) >= limit:
+            break
+    return out
+
+
+REPO_EXTENDS_RE = re.compile(r"\binterface\s+(?P<name>\w+)\s+extends\s+(?P<ext>[^{]+)")
+REPO_METHOD_RE = re.compile(
+    r"(?P<prefix>(?:@[\w.]+(?:\([^)]*\))?\s+)*)"
+    r"(?:public\s+)?(?P<ret>[\w.<>,\[\]\s]+?)\s+(?P<name>\w+)\s*\((?P<args>[^)]*)\)\s*;",
+    re.S,
+)
+
+
+def repository_inventory(root: Path, path: str) -> dict | None:
+    """Every method this repository declares, plus what it extends.
+
+    The platform names one member per obligation. Repairing only that member
+    returns the next sibling as a new card (pilot v7). The brief lists them
+    so one candidate can apply one transformation across the file."""
+    if not str(path).endswith("Repository.java"):
+        return None
+    f = Path(root) / path
+    if not f.is_file():
+        return None
+    text = f.read_text(encoding="utf-8", errors="replace")
+    ext = REPO_EXTENDS_RE.search(text)
+    methods: list[dict] = []
+    for m in REPO_METHOD_RE.finditer(text):
+        name = m.group("name")
+        if name in ("if", "for", "while", "switch", "return", "new"):
+            continue
+        prefix = m.group("prefix") or ""
+        methods.append({
+            "name": name,
+            "returns": " ".join((m.group("ret") or "").split()),
+            "args": " ".join((m.group("args") or "").split()),
+            "query": "@Query" in prefix,
+            "modifying": "@Modifying" in prefix,
+        })
+    if not ext and not methods:
+        return None
+    return {
+        "path": path,
+        "extends": " ".join((ext.group("ext") if ext else "").split()),
+        "methods": methods,
+        "batch": ("Repair every applicable method in this repository in this candidate, using one "
+                  "transformation. Compile-only is not an exit: the acceptance pass must include "
+                  "successful augmentation. Do not repeat a previous_attempts strategy."),
+        "playbook": "spring-to-quarkus-patterns/references/spring-data-jpa.md",
+    }
+
+
+def runtime_advice(item: dict, root: Path) -> dict:
+    """Advice for a packaging or startup obligation.
+
+    The platform reports ONE member at a time, so a card that fixes only the
+    named one comes straight back with the next. The other members declared in
+    the same file are listed here: they are where the same cause is likely to
+    be waiting, and fixing them together is one verification instead of five
+    (measured on pilot v7, where a repository's save, delete, findById and
+    findAll each cost a full cycle)."""
+    out = {
+        "description": "the destination did not build or did not start; repair the cause the platform named, at the file it named",
+        "message": str(item.get("message") or item.get("detail") or ""),
+        "cause": str(item.get("cause") or ""),
+        "member": str(item.get("member") or ""),
+        "links": ["https://quarkus.io/version/3.27/guides/spring-data-jpa", "https://quarkus.io/version/3.27/guides/maven-tooling"],
+    }
+    WRITE_PREFIXES = ("save", "delete", "remove", "update", "insert", "persist", "merge")
+    path = str(item.get("path") or "")
+    member = str(item.get("member") or "")
+    if not member:
+        blob = "%s\n%s" % (item.get("message") or "", item.get("detail") or "")
+        for rx in MEMBER_RES:
+            m = rx.search(blob)
+            if m:
+                member = m.group(1)
+                out["member"] = member
+                break
+    if member and str(item.get("cause") or "") == "underivable-query-method" and member.lower().startswith(WRITE_PREFIXES):
+        # Documented Spring Data naming: these are writes, and the platform's
+        # own suggestion ("did you forget @Query?") is wrong for them. A bare
+        # @Query with no query and no @Modifying silences the derivation check
+        # and proves nothing; pilot v7 annotated ten methods that way and the
+        # build kept moving while the repositories stopped meaning anything.
+        out["caution"] = ("%s is a write. A bare @Query is not a repair for it: the platform stops complaining and the method stops working. "
+                          "Make the interface extend CrudRepository<T, ID>, which PROVIDES save and delete, and drop the local declaration; "
+                          "annotate only a real query, and a modifying one with @Modifying." % member)
+        out["links"] = ["https://quarkus.io/version/3.27/guides/spring-data-jpa#repository-fragments",
+                        "https://docs.spring.io/spring-data/jpa/reference/jpa/query-methods.html"]
+    if member:
+        # The same member declared elsewhere in the destination: for a query
+        # method the platform cannot derive, the annotation that makes it
+        # derivable is usually already in the tree, on the interface that
+        # overrides it (pilot v7: PetRepository.findPetTypes could not be
+        # derived while SpringDataPetRepository carried its @Query two files
+        # away). Reading is not writing; the worker still edits only its own
+        # write set.
+        frozen = frozen_member_implementations(root, member)
+        if frozen:
+            out["frozen_implementations"] = frozen
+            with_query = [r for r in frozen if r.get("query")]
+            out["frozen_note"] = ("the frozen source implements %s in %s%s. A retirement removes the code and the frozen copy keeps it: "
+                                  "take the query from there rather than writing one"
+                                  % (member, ", ".join(r["path"].rsplit("/", 1)[-1] for r in frozen),
+                                     (' — for example %s' % with_query[0]["query"]) if with_query else ""))
+        elsewhere = member_references(root, member, path)
+        if elsewhere:
+            out["declared_elsewhere"] = elsewhere
+            out["elsewhere_note"] = ("%s is also declared in %s; if it carries the annotation or query this one needs, that is the answer "
+                                     "already present in this destination, not something to invent"
+                                     % (member, ", ".join(e["path"] for e in elsewhere)))
+    if member and path.endswith(".java"):
+        f = root / path
+        if f.is_file():
+            others = sorted({m for m in DECL_RE.findall(f.read_text(encoding="utf-8", errors="replace")) if m != member})
+            if others:
+                out["siblings"] = others
+                out["sibling_note"] = ("the platform names one member at a time; %s declares %s as well, and the same cause is likely to apply to them. "
+                                       "Repair them together: each one left costs another full verification." % (path.rsplit("/", 1)[-1], ", ".join(others)))
+    return out
+
+
+def config_advice(item: dict, root: Path, rules: dict, cat: dict) -> dict:
+    """The property line the incident points at, the incident variables, and the
+    catalog's documented mapping for that key (properties / property_prefixes)."""
+    out: dict = {}
+    path, line = str(item.get("path") or ""), int(item.get("line") or 0)
+    p = root / path
+    text = ""
+    name = path.rsplit("/", 1)[-1]
+    if name.startswith("application-") and "." in name:
+        out["profile"] = name[len("application-"):].split(".", 1)[0]
+    if p.is_file() and line > 0:
+        rows = p.read_text(encoding="utf-8", errors="replace").splitlines()
+        if line <= len(rows):
+            text = rows[line - 1].strip()
+            out["line_text"] = text
+    elif p.is_file() and line == 0:
+        # a file-level incident (profile file, missing single-file layout): every
+        # Spring key still in the file, each with the catalog mapping it has
+        keys = []
+        props = cat.get("properties") or {}
+        prefixes = cat.get("property_prefixes") or {}
+        for n, raw in enumerate(p.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            ln = raw.strip()
+            if not ln or ln.startswith("#") or "=" not in ln:
+                continue
+            k = ln.split("=", 1)[0].strip()
+            if k.startswith("quarkus.") or k.startswith("%"):
+                continue
+            to = props.get(k) or ""
+            if not to:
+                for prefix, row in prefixes.items():
+                    if k.startswith(prefix) and isinstance(row, dict):
+                        to = str(row.get("to") or "").replace("{rest}", k[len(prefix):])
+                        break
+            keys.append({"line": n, "key": k, "to": to})
+            if len(keys) >= 20:
+                break
+        if keys:
+            out["spring_keys"] = keys
+    rule = rules.get(str(item.get("rule_id")))
+    if isinstance(rule, dict):
+        for inc in rule.get("incidents") or []:
+            if not isinstance(inc, dict):
+                continue
+            uri = str(inc.get("uri") or "")
+            if uri.endswith(path) and int(inc.get("lineNumber") or 0) == line and isinstance(inc.get("variables"), dict):
+                out["variables"] = inc["variables"]
+                break
+    key = ""
+    if text and not text.startswith("#") and "=" in text:
+        key = text.split("=", 1)[0].strip()
+    elif isinstance(out.get("variables"), dict):
+        key = str(out["variables"].get("property") or out["variables"].get("key") or "")
+    if key:
+        out["property"] = key
+        props = cat.get("properties") or {}
+        if key in props:
+            out["mapping"] = {"to": props[key], "source": "compat-mapping.json properties"}
+        else:
+            for prefix, row in (cat.get("property_prefixes") or {}).items():
+                if key.startswith(prefix) and isinstance(row, dict):
+                    rest = key[len(prefix):]
+                    out["mapping"] = {"to": str(row.get("to") or "").replace("{rest}", rest), "source": str(row.get("source") or "")}
+                    break
+        vals = (cat.get("property_values") or {}).get(out.get("mapping", {}).get("to") or key)
+        if isinstance(vals, dict) and "=" in text:
+            v = text.split("=", 1)[1].strip()
+            if v in vals:
+                out["value_mapping"] = {"from": v, "to": vals[v]}
+    return out
+
+
+def collapse_generated(items: list[dict]) -> list[dict]:
+    """Errors in generated sources are one obligation per generator, not one
+    per line: a card that changes the plugin configuration clears them all.
+    The brief shows one item per generated root with the count, the files
+    and a sample of the compiler's words (pilot v6: 240 such items on one
+    pom card)."""
+    groups: dict[str, list[dict]] = {}
+    rest: list[dict] = []
+    for it in items:
+        if it.get("rule_id") == "GENERATED_SOURCE_ERROR":
+            gen = str(it.get("generated_path") or "")
+            key = "/".join(gen.split("/")[:3]) if gen.startswith("target/generated-sources/") else "target/generated-sources"
+            groups.setdefault(key, []).append(it)
+        else:
+            rest.append(it)
+    out: list[dict] = []
+    for key, rows in sorted(groups.items()):
+        first = dict(rows[0])
+        files = sorted({str(r.get("generated_path") or "") for r in rows})
+        first["id"] = "err:generated:%s" % key.rsplit("/", 1)[-1]
+        first["item_ids"] = [r["id"] for r in rows]
+        first["count"] = len(rows)
+        first["generated_root"] = key
+        first["generated_files"] = files[:12] + (["… %d more" % (len(files) - 12)] if len(files) > 12 else [])
+        first["sample"] = [str(r.get("message") or "")[:160] for r in rows[:5]]
+        first["message"] = "%d compiler errors in %d generated files under %s (one obligation: the generator's configuration)" % (len(rows), len(files), key)
+        out.append(first)
+    return out + rest
+
+
+def enrich(items: list[dict], root: Path, cluster: dict) -> list[dict]:
+    """Attach the rule's advice/links (from the findings the work list was
+    built on) and, for pom.xml loci, the element at the reported line plus
+    which advised artifacts the pom already carries."""
+    findings_p = next((root / rel for rel in (MTA_RESCAN_FINDINGS, MTA_FINDINGS) if (root / rel).is_file()), None)
+    rules = (load_json(findings_p).get("violations") or {}) if findings_p else {}
+    pom_p = root / "pom.xml"
+    els = pom_elements(pom_p) if cluster.get("path") == "pom.xml" and pom_p.is_file() else []
+    artifacts = {e["gav"].split(":")[-1] for e in els} | {e["gav"] for e in els}
+    managed, aliases = bom_managed(root), artifact_aliases(root)
+    inventory, renames, refs, cat = load_inventory(root), package_renames(root), _references(root), catalog(root)
+    owned = adapter_owned_annotations(root)
+    handlers = dict(handler_parameters(root).get("undocumented") or {})
+    out: list[dict] = []
+    for it in items:
+        row = dict(it)
+        rule = rules.get(str(it.get("rule_id")))
+        if it.get("source") == "javac" and it.get("rule_id") == "GENERATED_SOURCE_ERROR":
+            # the generator's configuration owns this error; the catalog documents the platform's generator settings
+            pc = {k: v for k, v in (cat.get("plugin_config") or {}).items() if k != "note" and isinstance(v, dict)}
+            gen = str(it.get("generated_path") or "")
+            owner = next((k for k in pc if ("openapi" in k and "/openapi/" in gen)), "")
+            row["advice"] = {"description": "an error in generated source: fix the generator's configuration in the pom, never the generated file",
+                             "message": str(it.get("message") or ""), "generated_path": gen,
+                             "plugin": owner, "plugin_config": pc.get(owner) or {}, "links": [str((pc.get(owner) or {}).get("docs") or "")] if owner else []}
+        elif it.get("source") == "javac" and it.get("rule_id") != "BUILD_UNRESOLVABLE":
+            row["advice"] = compile_advice(it, root, inventory, renames, refs, owned, handlers)
+        if it.get("source") == "mta" and it.get("kind") == "config":
+            cfg = config_advice(it, root, rules, cat)
+            if cfg:
+                row["config"] = cfg
+        if it.get("source") == "runtime":
+            row["advice"] = runtime_advice(it, root)
+        if it.get("rule_id") == "BUILD_UNRESOLVABLE":
+            # the resolver's own words; nothing else is measurable until Maven resolves the pom
+            row["advice"] = {"description": "Maven cannot resolve the pom: fix the named coordinate (a BOM-managed artifact needs no version; an artifact the BOM does not manage must not be added under an old name)", "message": str(it.get("message") or it.get("detail") or ""), "links": ["https://quarkus.io/guides/maven-tooling"]}
+        if isinstance(rule, dict) and it.get("source") == "mta":
+            incs = rule.get("incidents") if isinstance(rule.get("incidents"), list) else []
+            msg = next((str(i.get("message")) for i in incs if isinstance(i, dict) and i.get("message")), "")
+            row["advice"] = {"description": str(rule.get("description") or ""), "message": msg, "links": [l.get("url") for l in (rule.get("links") or []) if isinstance(l, dict) and l.get("url")]}
+            cond = rule_condition(str(it.get("rule_id") or ""))
+            if cond:
+                row["rule_condition"] = cond
+            present = sorted(t for t in _backticked(msg) if t in artifacts or t.split(":")[-1] in artifacts)
+            if present:
+                row["advice_present"] = present
+            if managed:
+                # advice written for Quarkus 2 names artifacts the pinned BOM does not manage
+                # (as `io.quarkus:quarkus-resteasy-reactive` or bare `quarkus-resteasy-reactive-jackson`);
+                # say so, and name the managed artifact the catalog documents for it
+                managed_ids = {m.split(":")[-1] for m in managed}
+                alias_ids = {k.split(":")[-1]: v for k, v in aliases.items()}
+                unmanaged = sorted(t for t in _backticked(msg)
+                                   if (t.startswith("io.quarkus:") and t not in managed) or (":" not in t and t.startswith("quarkus-") and t not in managed_ids))
+                if unmanaged:
+                    row["advice_unmanaged"] = unmanaged
+                    eq = {t: (aliases.get(t) or alias_ids.get(t.split(":")[-1])) for t in unmanaged}
+                    eq = {t: v for t, v in eq.items() if v}
+                    if eq:
+                        row["advice_managed_equivalent"] = eq
+                        row["advice_managed_present"] = sorted(v for v in eq.values() if v in artifacts or v.split(":")[-1] in artifacts)
+        if els:
+            el = element_at(els, int(it.get("line") or 0))
+            row["element"] = el or {"kind": "project", "gav": "", "line_start": 1, "line_end": 0}
+        out.append(row)
+    return out
+
+
+HANDLER_ITEM_FIELDS = ("status", "expected_status", "observed_body")
+# what the handler entry carries ONCE: the structured advice (each line and
+# each action verbatim), never the prose `locus` that repeats them, and the
+# parameter rows without their catalog rows (`catalog_rows` has each once)
+HANDLER_SHARED_FIELDS = ("handler", "classification", "first_action", "next_actions", "catalog_rows",
+                         "catalog_source", "locus_hints", "body_type", "generated_body")
+
+
+def rejection_handler_key(rr: dict) -> str:
+    """The handler a request-rejection advice is about: the planner's
+    handler_key, else type#member from its handler row, else its first locus."""
+    if rr.get("handler_key"):
+        return str(rr["handler_key"])
+    h = rr.get("handler") if isinstance(rr.get("handler"), dict) else {}
+    if h.get("type") or h.get("member"):
+        return "%s#%s" % (h.get("type") or "", h.get("member") or "")
+    hints = rr.get("locus_hints") or []
+    if hints and isinstance(hints[0], dict):
+        return "%s#%s" % (hints[0].get("type") or hints[0].get("path") or "", hints[0].get("member") or "")
+    return ""
+
+
+def group_request_rejections(rows: list[dict]) -> tuple[list[dict], dict[str, dict]]:
+    """(one slim row per item, the shared advice once per handler).
+
+    Seven obligations at one handler carry the same classification, the same
+    catalog rows and the same first action; rendering it seven times is seven
+    times the worker's context for nothing. Each item keeps what is its own
+    (obligation, scenario, the status pair, the observed body) and names its
+    handler; `handlers[key]` carries the rest verbatim, once."""
+    slim: list[dict] = []
+    handlers: dict[str, dict] = {}
+    for i in rows:
+        rr = (i.get("advice") or {}).get("request_rejection")
+        if not rr:
+            continue
+        key = rejection_handler_key(rr) or str(i.get("id") or "")
+        if key not in handlers:
+            entry = dict({k: rr[k] for k in HANDLER_SHARED_FIELDS if k in rr}, obligations=[])
+            if isinstance(entry.get("handler"), dict):
+                entry["handler"] = dict(entry["handler"], params=[{k: v for k, v in p.items() if k != "catalog_rows"}
+                                                                  for p in (entry["handler"].get("params") or []) if isinstance(p, dict)])
+            entry["boundary"] = ("the destination refused these requests before or at the handler boundary while the source "
+                                 "accepted them; nothing in the destination log at default level explains a 4xx: the answer is "
+                                 "in the handler signature above, not in a stack. Apply FIRST ACTION, then next_actions, in one edit.")
+            entry["amend"] = ("a file outside the write set (a locus_hints path) is amended BEFORE editing it: python3 "
+                              ".hermes/skills/migration/fix-until-green/scripts/amend-scope.py --root . --cluster <this cluster> "
+                              "--card $HERMES_KANBAN_TASK --path <that file> --reason <what binds there> --evidence parity:%s"
+                              % str(i.get("id") or ""))
+            handlers[key] = entry
+        handlers[key]["obligations"].append(str(i.get("id") or ""))
+        slim.append(dict({k: rr[k] for k in HANDLER_ITEM_FIELDS if k in rr}, obligation=str(i.get("id") or ""),
+                         scenario=str(i.get("scenario") or ""), handler=key))
+    return slim, handlers
+
+
+def slim_item_rejections(items: list[dict]) -> None:
+    """On the brief's item rows, replace each request_rejection advice by a
+    pointer to its handler entry (the parity brief renders it once)."""
+    for i in items:
+        adv = i.get("advice") if isinstance(i.get("advice"), dict) else None
+        rr = (adv or {}).get("request_rejection")
+        if not rr:
+            continue
+        key = rejection_handler_key(rr) or str(i.get("id") or "")
+        adv["request_rejection"] = dict({k: rr[k] for k in HANDLER_ITEM_FIELDS if k in rr}, handler=key,
+                                        see="parity.handlers[%s]: the parameter classification, FIRST ACTION, locus_hints "
+                                            "and catalog rows, rendered once for every item at this handler" % key)
+
+
+def parity_brief(items: list[dict], cluster: dict) -> dict:
+    """What a PARITY card is measured by, on the card itself.
+
+    A parity repair leaves the compile/test tuple where it was, so "the measure
+    decides" would read as "nothing can ever accept this card" (v9 card
+    t_77cae2b2: the CORS properties the brief asked for were written, the
+    acceptance pass was green, and advance.py reverted them because [0,0,0] did
+    not decrease). What decides is the comparison itself, re-run for this
+    card's own scenarios by the SAME acceptance command -- so the card says so,
+    and names the scenarios that have to come back PASS."""
+    rows = [i for i in items or [] if str(i.get("source") or "") == "parity"]
+    if not rows and str(cluster.get("gate") or "") != "parity":
+        return {}
+    scenarios = sorted({str(s) for i in rows for s in (i.get("scenarios") or []) if str(s)})
+    entry_points = sorted({str(i.get("entry_point") or "") for i in rows if i.get("entry_point")})
+    modes = sorted({str(i.get("security_mode") or "disabled").strip().lower() or "disabled" for i in rows})
+    mode_clause = ", --security-mode enabled" if modes == ["enabled"] else ""
+    rejections, handlers = group_request_rejections(rows)
+    return {
+        "gate": "parity",
+        "scenarios": scenarios,
+        "entry_points": entry_points,
+        # H1b: what the body difference IS, where it may be produced, and how
+        # the card reaches that file -- a digest alone sent v9 t_a755c0a1 to
+        # the wrong layer for 74 minutes
+        "body_diffs": [dict((i.get("advice") or {}).get("body_diff") or {}, obligation=str(i.get("id") or ""),
+                            scenario=str(i.get("scenario") or ""))
+                       for i in rows if (i.get("advice") or {}).get("body_diff")],
+        # H5b: a 5xx the source did not answer carries the destination's own
+        # exception and the product file its stack names -- the body was only
+        # an error id, and the exception lived only in the destination's log
+        "server_errors": [dict((i.get("advice") or {}).get("server_error") or {}, obligation=str(i.get("id") or ""),
+                               scenario=str(i.get("scenario") or ""))
+                          for i in rows if (i.get("advice") or {}).get("server_error")],
+        # H6b: a 4xx with an empty (or platform) body where the source accepted
+        # the same body-carrying request is a refusal before or at the handler
+        # boundary -- the card gets the handler's parameter binding against the
+        # compat catalog and the handler and DTO files, not a stack it does not
+        # have. The classification is rendered ONCE per handler under
+        # `handlers`; each item names its handler (v9 t_d280284d carried seven
+        # items at one handler, and the worker's context is the scarce resource)
+        "request_rejections": rejections,
+        "handlers": handlers,
+        "scope": SCOPE_RULE,
+        "evidence": EVIDENCE_RULE,
+        "stop": STOP_RULE,
+        "measured_by": (
+            "run-verify.sh --mode acceptance re-runs the scenario comparison for this card (run-parity.py, scoped to %s%s, "
+            "and the read oracle of %s) after the packaging and startup gates, and re-composes "
+            "verification/parity/receipt.json. You run the same command you always run; nothing extra."
+            % (", ".join(scenarios) if scenarios else "this card's entry points, read oracles included",
+               mode_clause,
+               ", ".join(entry_points) if entry_points else "its entry point(s)")),
+        "discharged_when": (
+            "the re-composed receipt records %s as PASS. Disappearing from the work list is not enough: a scenario that "
+            "became INCONCLUSIVE disappears too, and that is not a repair." %
+            (", ".join(scenarios) if scenarios else "the entry point(s) this card names")),
+        "refused_when": (
+            "the same obligation is still reported, or an entry point the receipt recorded PASS before this card is no "
+            "longer PASS -- a parity repair may not break another scenario. If the comparison could not run or the "
+            "receipt could not be composed, nothing was measured: the candidate is retained (VERIFICATION_PENDING) and "
+            "no attempt is spent."),
+    }
+
+
+def _card_of(root: Path, cluster: dict, task_env: str) -> str:
+    """The card this brief is for: the issued card when it carries this
+    cluster, else the task the environment names."""
+    issued = load_issued(root)
+    if str(issued.get("cluster") or "") == str(cluster.get("id") or "") and issued.get("task_id"):
+        return str(issued["task_id"])
+    return (task_env or "").strip()
+
+
+def _max_attempts(root: Path) -> int:
+    try:
+        from planner.decisions import load_decisions, max_attempts
+
+        return int(max_attempts(load_decisions(root)))
+    except Exception:
+        return 3
+
+
+def _refuse(code: str, detail: str) -> int:
+    print("REFUSE: %s %s" % (code, detail), file=sys.stderr)
+    return 1
+
+
+def load_issued(root: Path) -> dict:
+    p = root / LOOP_ISSUED
+    if not p.is_file():
+        return {}
+    try:
+        doc = load_json(p)
+    except (OSError, ValueError):
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+NOT_OPEN_NEXT = ("Your issued cluster is no longer on the open work list; this alone does not prove its gate passed. "
+                 "That is for advance.py to judge, not for you: run "
+                 "`bash .hermes/skills/migration/fix-until-green/scripts/run-verify.sh --root . --mode acceptance` if the "
+                 "candidate changed since, then `python3 .hermes/skills/migration/fix-until-green/scripts/advance.py "
+                 "--root . --cluster %s --card $HERMES_KANBAN_TASK`, and follow its verdict. Do not kanban_block for this.")
+
+PENDING_NEXT = (
+    "This card has a retained VERIFICATION_PENDING candidate; disappearance from the work list is not acceptance. "
+    "Read its pending reason and the latest diagnosis first. Restore with restore-pending.py --root . --cluster %s "
+    "only if the candidate is still set aside; do not overwrite restored edits. If the diagnosis identifies an "
+    "in-scope repair, apply it to the retained candidate before verification. If a prerequisite outside the scope "
+    "is still unresolved, keep the candidate and report that blocker. When the candidate or prerequisite is repaired, "
+    "run fresh run-verify.sh --mode acceptance, then advance.py once and follow its verdict. Restoring a candidate "
+    "does not restore its verification. Never retry an explicit stale-evidence refusal unchanged. "
+)
+
+
+def constituents_open(issued: dict, doc: dict) -> list[str]:
+    """The issued card's constituent obligations the measured work list still
+    reports: by item id, or by the stable identity the issue recorded (a line
+    shift re-hashes the id, not the obligation)."""
+    ids = {str(i) for i in (issued.get("items") or [])}
+    idents = {str(v) for v in (issued.get("item_identities") or {}).values() if v}
+    return sorted(str(i["id"]) for i in (doc.get("items") or [])
+                  if isinstance(i, dict) and (str(i.get("id")) in ids or (i.get("identity") and str(i["identity"]) in idents)))
+
+
+def _issued_not_open(issued: dict, doc: dict) -> dict:
+    """G2: the ISSUED card's own cluster is never "not open" to that card. A
+    mid-card rebuild that no longer lists it is a measurement of the
+    candidate (the obligations may be discharged); the issued record is the
+    plan, and advance.py is the judge.
+
+    A composite objective or planned unit is issued under a synthetic id the
+    raw cluster list never carries; its liveness is its constituents (v24 run
+    t_90e674d6 / t_e5f41dc2: both were told "no longer on the open work list"
+    at their first brief while every constituent was still reported). Only
+    when none is still reported is the card told it is not open."""
+    cid = str(issued.get("cluster") or "")
+    ws = [str(w) for w in (issued.get("write_set") or [])]
+    live = constituents_open(issued, doc)
+    row = {"id": cid, "path": ws[0] if ws else "", "kind": str(issued.get("kind") or ""),
+           "items": live or [str(i) for i in (issued.get("items") or [])], "write_set": ws,
+           "gate": str(issued.get("gate") or ""), "status": "issued",
+           "retry_key": str(issued.get("retry_key") or cid), "batch_scope": dict(issued.get("batch_scope") or {})}
+    if live:
+        row["liveness"] = "%d of %d issued constituent(s) still reported" % (len(live), len(issued.get("items") or []))
+        return row
+    if str(issued.get("gate") or "") == "planned-unit" and not ws:
+        return dict(row, not_open={"head": str(doc.get("head") or ""), "next": verification_next(issued, cid)})
+    return dict(row, not_open={"head": str(doc.get("head") or ""), "next": NOT_OPEN_NEXT % cid})
+
+
+VERIFY_ONLY_NEXT = (
+    "VERIFICATION ONLY: this planned unit's write set is empty -- no product edit is required or allowed. Its checks "
+    "are measured, not edited: run `bash .hermes/skills/migration/fix-until-green/scripts/run-verify.sh --root . "
+    "--mode acceptance` ONCE (it compares exactly the issued scope, %s, on the packaged artifact, one mode after the "
+    "other), then `python3 .hermes/skills/migration/fix-until-green/scripts/advance.py --root . --cluster %s --card "
+    "$HERMES_KANBAN_TASK` and follow its verdict. A check that FAILs becomes a parity obligation and the next issue "
+    "routes it to repair; do not edit anything for it in this unit. Do not re-read this brief to find another action.")
+
+VERIFY_SCOPE_MISSING_NEXT = (
+    "HARNESS ERROR VERIFICATION_SCOPE_MISSING: planned unit %s has an empty write set and its issue carries no "
+    "verification scope, so no verification can measure its checks. Nothing in this card can fix that: end this run "
+    "with kanban_block kind=needs_input quoting this line.")
+
+
+def verification_next(issued: dict, cid: str) -> str:
+    """The executable next action of a verification-only planned unit (v29 Owner: the worker was told to
+    'run-verify then advance' on a scope no verification could measure, and re-read the brief in a loop)."""
+    ver = issued.get("verification") if isinstance(issued.get("verification"), dict) else None
+    if not ver:
+        return VERIFY_SCOPE_MISSING_NEXT % cid
+    by_mode = ver.get("scenarios_by_mode") if isinstance(ver.get("scenarios_by_mode"), dict) else {}
+    parts = ["%d %s-mode scenario(s)" % (len(v), m) for m, v in sorted(by_mode.items()) if v]
+    if ver.get("read_oracles"):
+        parts.append("%d read oracle(s)" % len(ver["read_oracles"]))
+    return VERIFY_ONLY_NEXT % (", ".join(parts) or "nothing", cid)
+
+
+def select_cluster(doc: dict, root: Path, cluster_arg: str, task_env: str) -> tuple[dict | None, str, str]:
+    """This card's cluster, or (None, LOOP_* code, detail).
+
+    Measured live on destination v9 (2026-09-15), card t_cc3b6aac: after a
+    workspace bounce the work-list head was empty, brief.py printed
+    LOOP_NO_OPEN_CLUSTER, and the worker rummaged issued.json / steps.json
+    for ~20 minutes. The issued card is the plan; the head after a rebuild
+    is not this card.
+    """
+    clusters = {str(c["id"]): c for c in (doc.get("clusters") or []) if isinstance(c, dict) and c.get("id")}
+    issued = load_issued(root)
+    issued_cid = str(issued.get("cluster") or "")
+    issued_tid = str(issued.get("task_id") or "")
+    task = (task_env or "").strip()
+    def issued_scope(hit: dict) -> dict:
+        # Re-measurement reconstructs clusters from failures, not amendments.
+        # Only the matching issued card owns its recorded scope; keep the
+        # measured items and leave other clusters and the work list untouched.
+        if hit.get("id") == issued_cid and issued_tid and isinstance(issued.get("write_set"), list):
+            return dict(hit, write_set=list(issued["write_set"]))
+        return hit
+
+    terminator = ("Terminator: kanban_block kind=needs_input naming the cluster. "
+                  "Do not rummage verification/loop/. Do not patch a different cluster's write set.")
+
+    if cluster_arg:
+        if issued_tid and task and issued_tid != task:
+            return None, "LOOP_WRONG_CARD", (
+                "--card env %r is not the minted card %s; %s" % (task, issued_tid, terminator))
+        if issued_cid and issued_tid and task == issued_tid and cluster_arg != issued_cid:
+            return None, "LOOP_WRONG_CARD", (
+                "--cluster %r is not the issued cluster %s for this card; %s" % (cluster_arg, issued_cid, terminator))
+        hit = clusters.get(cluster_arg)
+        if hit is None and issued_cid and cluster_arg == issued_cid:
+            return _issued_not_open(issued, doc), "", ""
+        if hit is None:
+            return None, "LOOP_CLUSTER_NOT_OPEN", (
+                "cluster %s is not on the open work list; %s" % (cluster_arg, terminator))
+        return issued_scope(hit), "", ""
+
+    if task and issued_tid:
+        if issued_tid != task:
+            return None, "LOOP_WRONG_CARD", (
+                "this task %r is not the issued loop card %s; terminator kanban_complete if the loop record "
+                "already names this card, else %s" % (task, issued_tid, terminator))
+        if issued_cid:
+            hit = clusters.get(issued_cid)
+            if hit is None:
+                return _issued_not_open(issued, doc), "", ""
+            return issued_scope(hit), "", ""
+
+    head = head_cluster(doc)
+    if head is not None:
+        return head, "", ""
+    extra = ""
+    if issued_cid:
+        extra = " issued card is %s cluster %s;" % (issued_tid or "(unbound)", issued_cid)
+    return None, "LOOP_NO_OPEN_CLUSTER", (
+        "(work list head is empty);%s pass --cluster <id> or set HERMES_KANBAN_TASK to the issued card. %s"
+        % (extra, terminator))
+
+
+def location_obligation_lines(handler_rows: list) -> list:
+    """V17-5: the Location obligation of a handler-parameter row that carries
+    a location_translation, rendered beside its first action: every argument
+    of the source's buildAndExpand reaches build(...) as the same value and
+    null-tolerantly, and a different value needs a decisions.yaml
+    authorization. The row is the catalogue's; nothing here is a specimen's."""
+    out = []
+    for t in handler_rows:
+        lt = t.get("location_translation") if isinstance(t, dict) else None
+        if not isinstance(lt, dict):
+            continue
+        sites = ", ".join("%s.%s" % (str(x.get("type") or "").rsplit(".", 1)[-1], x.get("member")) for x in (t.get("sites") or []))
+        out.append("Location obligation (%s, at %s): %s %s %s (checked by %s)"
+                   % (t.get("from"), sites or "its handlers", lt.get("null_argument") or "", lt.get("substitution") or "",
+                      "; source: %s" % lt.get("source") if lt.get("source") else "", lt.get("checked_by") or "the unit checkpoint"))
+    return out
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--root", required=True)
+    ap.add_argument("--cluster", default="", help="this card's cluster id (default: issued.json when $HERMES_KANBAN_TASK matches, else the head)")
+    ap.add_argument("--section", action="append", default=[], metavar="KEY",
+                    help="print only this top-level section of the brief, in full (repeatable)")
+    # architect review 2026-09-29, G2: the worker always reads the human digest; machines ask for JSON explicitly
+    ap.add_argument("--json", action="store_true", help="print the complete brief as JSON on stdout (for programs; "
+                    "the default is the human digest, whatever the size)")
+    ap.add_argument("--full", action="store_true", help="the same as --json (the documented machine contract)")
+    ap.add_argument("--file", default="", metavar="PATH", help="every measured obligation at this path, one line each (bounded)")
+    ap.add_argument("--item", default="", metavar="ID", help="one measured obligation in full")
+    ap.add_argument("--symbol", default="", metavar="NAME", help="every measured obligation naming this symbol (bounded)")
+    ap.add_argument("--card", action="store_true", help="a bounded view of THIS native card (its body, current issue, "
+                    "budget and latest verdicts); the full history stays on the board")
+    ap.add_argument("--spill", default="", metavar="FILE", help="a one-line JSON tool-result spill file to select from")
+    ap.add_argument("--field", default="", metavar="PATH", help="with --spill: a dotted path (task.body, comments[-3:], "
+                    "worker_context.issue)")
+    ap.add_argument("--limit", type=int, default=4000, help="with --spill: the most characters of the value to print")
+    args = ap.parse_args(argv)
+    root = Path(args.root).resolve()
+    if args.spill:
+        print(json.dumps(select_spill(Path(args.spill), args.field, args.limit), indent=2))
+        return 0
+    if args.card:
+        print(card_view(root, os.environ.get("HERMES_KANBAN_TASK") or str((load_issued(root) or {}).get("task_id") or "")))
+        return 0
+    doc = load_json(root / WORKLIST)
+    owners = diagnostic_owners(root)
+    if args.file or args.item or args.symbol:
+        print(select_facts(doc, root, file=args.file, item=args.item, symbol=args.symbol, owners=owners))
+        return 0
+    cluster, code, detail = select_cluster(doc, root, args.cluster, os.environ.get("HERMES_KANBAN_TASK") or "")
+    if cluster is None:
+        return _refuse(code, detail)
+    write_set = list(cluster.get("write_set") or [])
+    items = collapse_generated(enrich(items_of(doc, cluster), root, cluster))
+    steps_p = root / LOOP_DIR / "steps.json"
+    steps = load_json(steps_p) if steps_p.is_file() else {}
+    # what this cluster's earlier attempts did and why the transaction refused
+    # them: the retry card must not repeat them (v6 t_fc2b54c5 copied the
+    # previous card's deletion and was vetoed for the same reason)
+    previous = []
+    voided_rows: list = []
+    voided = _void_index(root)
+    rk = str(cluster.get("retry_key") or cluster["id"])
+    retry_map = steps.get("retry_keys") or {}
+    for r in (steps.get("rejected") or []):
+        if not isinstance(r, dict) or r.get("rewound"):
+            continue
+        cid = str(r.get("cluster") or "")
+        rkey = str(r.get("retry_key") or retry_map.get(cid) or "")
+        if cid != cluster["id"] and rkey != rk:
+            continue
+        status, why = _void_status(r, voided)
+        if status == "voided":
+            # the Operator voided THIS rejection as harness-caused: history, not an attempt this card must avoid
+            # repeating (v29 run 85 spent its whole run reading six voided refusals in previous_attempts)
+            voided_rows.append({"card": r.get("card"), "cluster": cid, "reason": _clip(r.get("reason"), 160),
+                                "native_reject": str(r.get("native_reject") or ""), "voided_because": _clip(why, 200)})
+            continue
+        previous.append({
+            **({"void_status": "unresolved", "void_note": why} if status == "unresolved" else {}),
+            "card": r.get("card"),
+            "reason": r.get("reason"),
+            "changed": r.get("changed"),
+            "measure": (r.get("measure") or {}).get("tuple"),
+            "loci_before": list(r.get("loci_before") or []),
+            "loci_after": list(r.get("loci_after") or []),
+            "patch_summary": list(r.get("patch_summary") or r.get("changed") or []),
+            "deleted_by_revert": list(r.get("deleted_by_revert") or []),
+            "legal_next": str(r.get("legal_next") or ""),
+            "write_set": list(r.get("write_set") or []),
+        })
+    pending = pending_for(steps, cluster["id"])
+    retry_state = _retry_state(root, steps, cluster, write_set, previous, rk)
+    repo = repository_inventory(root, str(cluster.get("path") or ""))
+    brief = {
+        "schema": "rhoai3.loop-brief/v1",
+        "cluster": cluster,
+        "write_set": write_set,
+        "items": items,
+        "not_counted": [n for n in (doc.get("not_counted") or []) if str(n.get("path") or "") in write_set],
+        # read FIRST (the leading underscore sorts it first in the printed JSON):
+        # what the last rollback removed, what is still owed, the budget, in a
+        # few lines -- the full attempt history stays in previous_attempts
+        "_retry_state": retry_state,
+        "previous_attempts": previous,
+        "voided_attempts": voided_rows,
+        # the one budget answer (planner.budget): the same numbers the issued
+        # card, a rejection and a deferral carry
+        "budget": _governing_budget(root, steps, cluster["id"], rk),
+        "attempts_left": _governing_budget(root, steps, cluster["id"], rk)["left"],
+        "measure": doc["measure"],
+        "procedure": PROCEDURE,
+        "rule": "Edit only the write set as amended on the record (" + SCOPE_RULE + ") Do not edit tests. Do not touch pom.xml unless it is in the write set. Do not repeat a previous attempt (previous_attempts names the refused patch, before/after diagnostic loci, and the legal next action). A compile item with already_imported is not a missing import. Do not run extra mvn beside run-verify.sh. Then run run-verify.sh --mode acceptance and advance.py; the measure decides, not you.",
+        "evidence_rule": EVIDENCE_RULE,
+        "stop_rule": STOP_RULE,
+        # the verify count for THIS card and the obligations each run left
+        # reported (run-verify.sh records it): the stop rule is applied from
+        # this, not from the worker's own counting
+        "verify_runs": dict(verify_runs_for(root, _card_of(root, cluster, os.environ.get("HERMES_KANBAN_TASK") or "")),
+                            rule=STOP_RULE),
+    }
+    slim_item_rejections(items)
+    if cluster.get("not_open"):
+        brief["issued_not_open"] = dict(cluster["not_open"])
+        brief["procedure"] = cluster["not_open"]["next"]
+    if pending:
+        recovery_next = PENDING_NEXT % cluster["id"]
+        brief["procedure"] = recovery_next
+        if cluster.get("not_open"):
+            cluster["not_open"]["next"] = recovery_next
+            brief["issued_not_open"]["next"] = recovery_next
+        brief["verification_pending"] = {
+            "card": pending.get("card"),
+            "cause": pending.get("cause"),
+            "reason": pending.get("reason"),
+            "blocked": pending.get("blocked") or [],
+            "changed": pending.get("changed") or pending.get("stored") or [],
+            "restore": "python3 .hermes/skills/migration/fix-until-green/scripts/restore-pending.py --root . --cluster %s" % cluster["id"],
+            "next": recovery_next,
+        }
+    # B11: the checkpoint a respawned worker starts from. A run that the
+    # tool-loop guard halted (or that crashed) leaves its unaccepted edits on
+    # the tree; the next run of the SAME card is handed them, with whether the
+    # last acceptance verification measured exactly this tree, and the one
+    # next action -- never "start over" (v12 t_e5c9a129 run 29 re-explored for
+    # minutes a candidate run 28 had already verified).
+    changed_now = [] if pending else product_paths_changed(root)
+    if changed_now:
+        st = load_state(root) or {}
+        run_doc = load_json(root / VERIFY_RUN) if (root / VERIFY_RUN).is_file() else {}
+        verified = (bool(st.get("candidate_sha256")) and str(st.get("candidate_sha256")) == candidate_sha256(root)
+                    and str((run_doc or {}).get("mode") or "") == "acceptance")
+        nxt = (("python3 .hermes/skills/migration/fix-until-green/scripts/advance.py --root . --cluster %s --card "
+                "\"$HERMES_KANBAN_TASK\" -- the last acceptance verification measured exactly this tree" % cluster["id"])
+               if verified else
+               ("bash .hermes/skills/migration/fix-until-green/scripts/run-verify.sh --root . --mode acceptance, then "
+                "advance.py -- the edits on the tree were not measured as they stand"))
+        brief["candidate_on_tree"] = {
+            "changed": changed_now[:20],
+            "verified": verified,
+            "measure_at_verify": st.get("measure") if verified else None,
+            "next": nxt,
+            "note": ("these edits are this card's unaccepted candidate, left by an earlier run of it: do not redo them "
+                     "and do not search for what they already did"),
+        }
+        brief["procedure"] = "FIRST: %s. Then, only if advance.py rejects it: %s" % (nxt, brief["procedure"])
+    if repo:
+        brief["repository"] = repo
+    parity = parity_brief(items, cluster)
+    if parity:
+        brief["parity"] = parity
+    advice = advice_guidance(root, items)
+    if advice:
+        brief["exception_advice"] = advice
+    # The SEALED SCOPE. The card is not finished while any inventoried member
+    # still breaks the rule, so the worker is told the whole roster and the
+    # current verdict on each one — including the members that are already
+    # right and must be left alone.
+    ref = cluster.get("batch_scope") or {}
+    scope_p = root / str(ref.get("path") or "") if ref.get("path") else None
+    if scope_p is not None and scope_p.is_file():
+        scope = load_json(scope_p)
+        family = str(scope.get("rule") or "") == CHECKED_FAMILY_RULE
+        unit = str(scope.get("kind") or "") == UNIT_KIND
+        issued_now = load_json(root / LOOP_ISSUED) if (root / LOOP_ISSUED).is_file() else {}
+        # assess_unit dispatches on the sealed rule, so a repository inventory
+        # and a checked-exception family are assessed exactly as before and a
+        # unit is assessed by its own rule.
+        verdicts = {r["member"]: r for r in assess_unit(root, scope)}
+        def _member_name(m: dict) -> str:
+            # how assess_unit names a row: the path, and the member when the
+            # inventory records one. A repository or family inventory names its
+            # members directly and keeps the name it always had.
+            if "member" in m:
+                return str(m["member"])
+            mid = str(m.get("member_id") or "")
+            return "%s%s" % (str(m.get("path") or ""), ("#" + mid) if mid else "")
+
+        brief["batch_scope"] = {
+            "rule": scope.get("rule"),
+            "repository": scope.get("repository"),
+            "digest": ref.get("digest"),
+            "members": [dict(m, **{"verdict": verdicts.get(_member_name(m), {}).get("verdict", "inconclusive"),
+                                   "detail": verdicts.get(_member_name(m), {}).get("detail", "")})
+                        for m in scope.get("members") or []],
+            "rule_note": ((str(scope.get("rule_note") or "") + " ") if family else "") + (
+                          "Every member listed here is assessed against the rule when the candidate is judged, "
+                          "and any that still violates it refuses the card. A member whose verdict is already ok "
+                          "needs no edit and earns nothing if you change it. Written explanations do not count: "
+                          "the assessment is made from the tree."),
+            "introduced_by": scope.get("introduced_by") if family else None,
+            "continuations": list((issued_now or {}).get("continuations") or []),
+            "amend": (("Family members are already in the write set; amend-scope.py does not widen a family.")
+                      if family else
+                      ("A unit's scope is REVISED on evidence, never on a reason alone: amend-scope.py --root . "
+                       "--cluster %s --card $HERMES_KANBAN_TASK --path <file> --reason <what this unit cannot finish "
+                       "without it> --evidence javac:<a diagnostic identity the current work list carries> | "
+                       "model:<a symbol this unit sealed> | runtime:<an rt: obligation the current work list carries>. "
+                       "Bounded: four revisions, and never past %d file(s) in the write set." % (cluster["id"], UNIT_MAX_FILES))
+                      if unit else
+                      ("If a member cannot be finished without editing a file outside the write set, record the "
+                       "amendment BEFORE touching it: amend-scope.py --root . --cluster %s --card $HERMES_KANBAN_TASK "
+                       "--path <file> --reason <what this card cannot finish without it>. Bounded: two per card." % cluster["id"])),
+            "amendments": list((issued_now or {}).get("amendments") or []),
+        }
+        desc = (issued_now or {}).get("objective") if str(scope.get("rule") or "") == OBJECTIVE_RULE else None
+        if isinstance(desc, dict):
+            # compatibility-objectives/v1: ONE objective issued whole. Its
+            # constituents are the ordered actions (each judged by its own
+            # rule); the checks say what must pass NOW and what is due later.
+            open_ids = {str(i.get("id")) for i in items if isinstance(i, dict)}
+            by_c = {}
+            for v in verdicts.values():
+                by_c.setdefault(str(v.get("constituent") or ""), []).append(v)
+            fam = (((catalog(root).get("objective_families") or {}).get("families") or {}).get(str(desc.get("family") or ""))
+                   or {})
+            brief["objective"] = {
+                "family": desc.get("family"),
+                # M-4: the family's documented translation, delivered with the objective (not only as a reference hit)
+                **{k: fam[k] for k in ("source_semantics", "action", "unsupported") if fam.get(k)},
+                "actions": [{"constituent": u["cluster"], "rule": (u.get("seal") or {}).get("rule") or "cluster",
+                             "files": list(u.get("write_set") or []), "obligations": len(u.get("items") or []),
+                             # v30 H-3: the OPEN compiler obligations of this constituent on the measured tree, beside
+                             # the structural-rule counter (a zero there read as "nothing to do" while 23 were open)
+                             "open_obligations": len(set(map(str, u.get("items") or [])) & open_ids),
+                             "structural_rule_violations": sum(1 for v in by_c.get(u["cluster"], []) if v.get("verdict") == "violates"),
+                             "members_still_violating": sum(1 for v in by_c.get(u["cluster"], []) if v.get("verdict") == "violates")}
+                            for u in desc.get("units") or []],
+                "by_file": obligations_by_file(items),
+                "checks_now": sorted({"%s (%s)" % (r["check"], r["requirement"].split(":", 2)[-1][:80])
+                                      for r in desc.get("check_plan") or [] if r.get("stage") == "immediate"}),
+                # M-2: WHERE a later check is first measured (its earliest card and milestone), what it waits on, and
+                # where it is due -- not only "M4": the schedule already knows the earliest useful point
+                "checks_later": sorted({_later_line(r) for r in desc.get("check_plan") or [] if r.get("stage") == "later"})[:40],
+                "rule": ("All constituents are ONE coordinated change inside one write set: the checkpoint judges the "
+                         "objective once, after every constituent. A later check is not passed by this card and is "
+                         "measured where it is due."),
+            }
+        if unit:
+            # THE UNIT, as the worker has to see it: what one coherent repair
+            # covers, what it is moving to and on whose authority, what decides
+            # that it is finished, and the one rule that makes a coordinated
+            # repair possible at all -- the checkpoint, not each edit, is judged.
+            members: dict[str, list[dict]] = {}
+            for m in scope.get("members") or []:
+                name = _member_name(m)
+                v = verdicts.get(name, {})
+                members.setdefault(str(scope.get("rule") or ""), []).append({
+                    "member": name, "path": str(m.get("path") or ""), "type": str(m.get("type") or ""),
+                    "member_id": str(m.get("member_id") or ""), "state": str(m.get("state") or ""),
+                    "signature": str(m.get("signature") or ""), "consumer": str(m.get("consumer") or ""),
+                    "verdict": v.get("verdict", "inconclusive"), "detail": v.get("detail", ""),
+                })
+            # an adapter-owned annotation is RETIRED, not replaced: its row's
+            # action is the unit's first action, the same way a handler
+            # parameter's catalogue action is the item's
+            retire = [t for t in (scope.get("target_symbols") or []) if isinstance(t, dict) and t.get("retire")]
+            # V16-5: a handler_parameters row leads its symbol, ahead of any
+            # rename, and names the handlers it is for; the rename then covers
+            # only the other uses and says which handlers it is NOT for
+            handler = [t for t in (scope.get("target_symbols") or []) if isinstance(t, dict) and t.get("handler_parameter")]
+            scoped = [t for t in (scope.get("target_symbols") or []) if isinstance(t, dict) and t.get("not_for")]
+            helpers = [t for t in (scope.get("target_symbols") or []) if isinstance(t, dict) and t.get("helper_parameter")]
+            first = (["%s (%s, at %s)" % (t.get("action"), (t.get("catalog_row") or {}).get("key"),
+                                         ", ".join("%s.%s(%s)" % (str(x.get("type") or "").rsplit(".", 1)[-1], x.get("member"),
+                                                                 x.get("parameter")) for x in (t.get("sites") or [])))
+                      for t in handler]
+                     + location_obligation_lines(handler)
+                     + ["then, where a helper takes %s (%s): %s" % (t.get("from"), ", ".join("%s.%s(%s)" % (
+                         str(x.get("type") or "").rsplit(".", 1)[-1], x.get("member"), x.get("parameter")) for x in (t.get("sites") or [])),
+                         t.get("action")) for t in helpers]
+                     + ["everywhere else %s is used (not those handler parameters), move to %s (compat-mapping symbol_renames)"
+                        % (t.get("from"), t.get("to")) for t in scoped]
+                     + ["%s (%s)" % (t.get("action"), (t.get("catalog_row") or {}).get("key")) for t in retire])
+            brief["unit"] = {
+                "unit_id": str(scope.get("unit_id") or ""),
+                "rule": str(scope.get("rule") or ""),
+                "family_key": str(scope.get("family_key") or ""),
+                "members_by_rule": members,
+                "symbols": list(scope.get("symbols") or []),
+                # every documented target with the catalogue row that documents
+                # it: a replacement with no row is not a target, and a
+                # diagnostic about one is not explained by anything
+                "target_symbols": [dict({"from": t.get("from"), "to": t.get("to"), "catalog_row": t.get("catalog_row")},
+                                        **({"retire": True, "action": t.get("action")} if t.get("retire") else {}),
+                                        **({"handler_parameter": True, "action": t.get("action"), "sites": t.get("sites")}
+                                           if t.get("handler_parameter") else {}),
+                                        **({"translation": t.get("translation")} if t.get("translation") else {}),
+                                        **({"location_translation": t.get("location_translation")}
+                                           if t.get("location_translation") else {}),
+                                        **({"helper_parameter": True, "action": t.get("action"), "when": t.get("when"),
+                                            "sites": t.get("sites")} if t.get("helper_parameter") else {}),
+                                        **({"via_package": t.get("via_package")} if t.get("via_package") else {}),
+                                        **({"applies_to": t.get("applies_to"), "not_for": t.get("not_for")}
+                                           if t.get("not_for") else {}))
+                                   for t in (scope.get("target_symbols") or [])],
+                "completion": list(scope.get("completion") or []),
+                "bounds": dict(scope.get("bounds") or {}),
+                "evidence": list(scope.get("evidence") or []),
+                "revisions": list((issued_now or {}).get("revisions") or []),
+                **({"first_action": " ".join(first)} if first else {}),
+                # V16-4: what each owed implementation must BE, including the
+                # CDI exposure a fragment delegate is owed under, and the one
+                # thing that proves the wiring -- packaging, not this checkpoint
+                **({"implementation": [dict({k: r.get(k) for k in ("parent", "type", "path", "contract", "members")},
+                                            **({"cdi": r["cdi"],
+                                                "required": ("annotate %s @%s and @%s(%s.class), beside its `implements %s`: "
+                                                             "its only CDI bean type is its concrete class, so the generated "
+                                                             "repository stays the bean of %s. Do not remove the scope, "
+                                                             "profile-gate the delegate, rename it or retarget an injection. "
+                                                             "The structural check proves the annotations; only the package "
+                                                             "gate under the decided build profile proves the wiring"
+                                                             % (str(r.get("type") or "").rsplit(".", 1)[-1],
+                                                                str(r["cdi"].get("scope") or "").rsplit(".", 1)[-1],
+                                                                r["cdi"].get("typed"),
+                                                                str(r.get("type") or "").rsplit(".", 1)[-1],
+                                                                str(r.get("parent") or "").rsplit(".", 1)[-1],
+                                                                str(r.get("parent") or "").rsplit(".", 1)[-1]))}
+                                               if isinstance(r.get("cdi"), dict) else {}),
+                                            **behaviour_brief(r, absent_result_semantics(root)))
+                                       for r in (scope.get("implementation_obligations") or [])
+                                       if isinstance(r, dict) and r.get("verify") != "template"]}
+                   if any(isinstance(r, dict) and r.get("verify") != "template"
+                          for r in (scope.get("implementation_obligations") or [])) else {}),
+                "checkpoint": (
+                    "This unit is judged ONCE, at its checkpoint, not per edit. Intermediate regressions INSIDE the "
+                    "sealed symbols are allowed until then: the compile count may stand still or briefly rise, and the "
+                    "step is still accepted, provided every diagnostic that remains is one the sealed symbols or the "
+                    "documented targets above explain. Nothing else is relaxed -- a failing test, a new mandatory "
+                    "obligation, a gate that was passing and is not any more, one of this unit's own sealed diagnostics "
+                    "still reported, or a sealed member that violates its rule all refuse the card. So repair the whole "
+                    "unit in one candidate; do not stop half way to make the count fall."),
+            }
+    pr = _previous_run(root)
+    if pr is not None:
+        brief["previous_run"] = pr
+    lv = root / LOOP_DIR / "last-verify.json"
+    if lv.is_file():
+        try:
+            brief["last_verify"] = load_json(lv)
+        except (OSError, ValueError):
+            pass
+    if isinstance(brief.get("last_verify"), dict):
+        try:
+            now = candidate_sha256(root)
+        except Exception:
+            now = ""
+        brief["last_verify_state"] = verification_state(brief["last_verify"], _outcome_bridge._ids()[0], now)
+    own = issued_ownership(root)
+    planned = planned_requirements(root, write_set, own)
+    if planned:
+        brief["planned_requirements"] = planned
+    typed = typed_repair_section(root, cluster, write_set, own)
+    if typed:
+        # V26-1: the catalog's qualified typed transformation is this unit's FIRST ACTION
+        brief["typed_repair"] = typed
+        if typed.get("first_action") and not pending and not changed_now:
+            brief["procedure"] = "FIRST: %s. Then run-verify.sh --mode acceptance and advance.py; %s" % (
+                typed["first_action"], brief["procedure"])
+    if own is not None:
+        # what THIS card is judged by now, from its issued contract -- never derived from the paths it
+        # shares with other owners (v24 run t_dbde15ae: the Profile card's digest labelled six repository
+        # requirements owned by other cards as its own checks due now)
+        brief["issued_checks"] = {"outcome": own["outcome"], "checks_now": own["checks_now"],
+                                  "requirements": sorted(own["requirements"])}
+        others = planned_requirements(root, write_set, None)
+        elsewhere = sorted(r["id"] for r in others if r["id"] not in own["requirements"])
+        if elsewhere:
+            brief["issued_checks"]["other_owners_on_these_paths"] = elsewhere
+    # V26-3: the resolved context is an attachment beside this brief; the brief carries its index only
+    brief["resolved_context"] = resolved_context(root, cluster, write_set, doc)
+    unmet = outcome_unmet(root)
+    if unmet:
+        brief["outcome_unmet"] = unmet
+    if cluster.get("not_open") and planned and not pending and not changed_now:
+        owed = planned_owed_next(cluster["id"], write_set, planned, own, root)
+        cluster["not_open"]["next"] = owed
+        brief["issued_not_open"]["next"] = owed
+        brief["procedure"] = owed
+    if owners is not None:
+        for it in items:
+            if isinstance(it, dict):
+                it["ownership"] = ownership_of(it, owners)
+    labels, ownership_note = diagnostic_ownership(doc, root)
+    if labels:
+        shared = [dict(i, issuance=labels[str(i.get("id"))]) for i in doc.get("items") or []
+                  if i.get("path") in write_set and str(i.get("id")) in labels
+                  and labels[str(i.get("id"))].startswith("not in")]
+        if shared:
+            brief["shared_path_diagnostics"] = {"note": ownership_note, "items": shared}
+    stem = "brief-%s" % cluster["id"].replace(":", "-")
+    write_canonical(root / LOOP_DIR / (stem + ".json"), brief)
+    text = json.dumps(brief, indent=2, sort_keys=True)
+    # the same brief, one key per line, so it can be read by line ranges and searched
+    (root / LOOP_DIR / (stem + ".txt")).write_text(text + "\n", encoding="utf-8")
+    if args.section:
+        missing = [k for k in args.section if k not in brief]
+        if missing:
+            return _refuse("BRIEF_SECTION_UNKNOWN", "no section %s; the sections are: %s"
+                           % (", ".join(missing), ", ".join(sorted(brief))))
+        print(json.dumps({k: brief[k] for k in args.section}, indent=2, sort_keys=True))
+        return 0
+    if args.json or args.full:
+        print(text)
+        return 0
+    # one stream, one reading order, whatever the size (architect review 2026-09-29, G2): v28 t_1cec0a74 got
+    # an 8 KB JSON brief whose previous_run and planned_requirements sat mid-document, and a guidance header
+    # on stderr is not proof of what the terminal shows first
+    print(brief_digest(brief, stem))
+    return 0
+
+
+def select_spill(path: Path, field: str, limit: int = 4000) -> dict:
+    """One field of a JSON tool-result spill, bounded, with honest metadata (v29 Owner run 89: the 308K-character
+    kanban_show spill was previewed with 'truncated: false, total_lines: 0' and a suggestion to use execute_code,
+    which the loop card refuses). The path is dotted keys and [n] / [a:b] list selections."""
+    import re as _re
+    out: dict = {"file": str(path), "field": field or "(whole document)"}
+    try:
+        raw = path.read_text(encoding="utf-8", errors="replace")
+        doc = json.loads(raw)
+    except (OSError, ValueError) as exc:
+        return dict(out, error="not a readable JSON document: %s" % str(exc)[:200])
+    out["file_chars"] = len(raw)
+    val = doc
+    for part in [p for p in _re.split(r"\.(?![^\[]*\])", field) if p] if field else []:
+        m = _re.fullmatch(r"([^\[\]]*)((?:\[[^\]]*\])*)", part)
+        key, sels = (m.group(1), _re.findall(r"\[([^\]]*)\]", m.group(2))) if m else (part, [])
+        try:
+            if key:
+                val = val[key] if isinstance(val, dict) else None
+            for sel in sels:
+                if ":" in sel:
+                    a, b = sel.split(":", 1)
+                    val = val[int(a) if a else None:int(b) if b else None]
+                else:
+                    val = val[int(sel)]
+        except (KeyError, IndexError, TypeError, ValueError):
+            val = None
+        if val is None:
+            return dict(out, error="no value at %s" % part, keys=sorted(doc)[:40] if isinstance(doc, dict) else [])
+    text = val if isinstance(val, str) else json.dumps(val, indent=1, sort_keys=True)
+    out.update({"type": type(val).__name__, "total_chars": len(text), "shown_chars": min(len(text), max(0, limit)),
+                "truncated": len(text) > max(0, limit), "value": text[:max(0, limit)]})
+    if isinstance(val, (list, dict)):
+        out["length"] = len(val)
+    return out
+
+
+def card_view(root: Path, task: str, board=None, recent: int = 5) -> str:
+    """A bounded view of this native card (architect diagnosis of Owner run 89: the full show response was
+    308K characters, 159K of them machine accept records; the task body was 466). The board keeps every record;
+    this names what it omits and how to read it."""
+    from planner import native_control as NC
+    board = board if board is not None else _native_board(root)
+    if board is None or not task:
+        return "no native card here (task %r)" % task
+    t = board.task(task) or {}
+    recs = board.records(task)
+    kinds: dict = {}
+    for r in recs:
+        kinds[r["kind"]] = kinds.get(r["kind"], 0) + 1
+    issue = next((r for r in reversed(recs) if r["kind"] == "issue"), {})
+    ver = issue.get("verification") or {}
+    out = ["CARD %s -- %s (%s)" % (task, _clip(t.get("title"), 90), t.get("status")),
+           "body: %s" % _clip(t.get("body"), 600),
+           "current issue: run %s seq %s cluster %s, %d writable path(s)%s" % (
+               issue.get("run"), issue.get("seq"), issue.get("cluster") or "(none)", len(issue.get("allowed_paths") or []),
+               ("; verification %s" % ", ".join("%d %s-mode" % (len(v), m) for m, v in sorted((ver.get("scenarios_by_mode") or {}).items())))
+               if ver else "")]
+    try:
+        role, run, oid, plan, node = NC.node_context(board, task)
+        b = NC.budget_state(board, run, plan, node)
+        out.append("budget: %s of %s spent against %s" % (b["spent"], b["limit"], b["key"]))
+    except Exception:  # noqa: BLE001 - a card without a plan node has no family budget to show
+        pass
+    verdicts = [r for r in recs if r["kind"] in ("reject", "reject-voided", "accept-commit", "accept-evaluated")]
+    for r in verdicts[-recent:]:
+        out.append("  %s run %s %s%s" % (r["kind"], r.get("run"), r.get("cluster") or "",
+                                        (": " + _clip(r.get("reason"), 140)) if r.get("reason") else
+                                        (" outcome_accepted=%s" % r.get("outcome_accepted")) if "outcome_accepted" in r else ""))
+    out.append("history: %d record(s) on the board (%s); %d verdict record(s) shown of %d. Full history: hermes kanban "
+               "show %s (large). Evidence of one obligation: brief.py --root . --item <id>." % (
+                   len(recs), ", ".join("%s %d" % kv for kv in sorted(kinds.items())), min(recent, len(verdicts)),
+                   len(verdicts), task))
+    return "\n".join(out)
+
+
+def scratch_lines(brief: dict) -> list[str]:
+    """v30 H-1/H-2 (t_6fa85bc5): a generator jar downloaded into the product root made the next issue refuse
+    ISSUE_BASELINE_DRIFT, and template text was re-read with ~20 unzip|sed calls. Name the sanctioned scratch
+    (outside the product: never judged, parked or drift) and, for a card that edits generator templates, the
+    bounded lookup of the pinned generator's own template text."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("generator_template", Path(__file__).resolve().parent / "generator-template.py")
+    gt = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gt)  # type: ignore[union-attr]
+    out = ["SCRATCH: put downloads, extracted jars and tool output ONLY under %s/ (outside the product; anything "
+           "else you leave in the destination root is a product change)" % gt.scratch_dir()]
+    if any(str(p).endswith(".mustache") for p in brief.get("write_set") or []):
+        out.append("GENERATOR TEMPLATES: the pinned generator's own template text, bounded -- "
+                   "generator-template.py --root . --template <path in the jar> [--lines a:b] | --list <prefix>; "
+                   "do not download or unzip the generator yourself")
+    return out
+
+
+MECHANICAL_SITES = ("import", "throws")
+
+
+def obligations_by_file(items: list) -> dict:
+    """{path: {"mechanical": {site: [lines]}, "decision": {site: [lines]}, "ids": [...], "unclassified": [lines]}}
+    for the measured obligations of an objective (v30 H-3: 97 obligations were a flat list; workers rebuilt the
+    file -> line map with 60+ greps). The site is the compiler's own tree position (JdkDiagnostics ``site``):
+    an import or a throws clause is a mechanical removal; a catch or any other use is a decision site, where the
+    family's rule chooses the platform behaviour. Items without a site (an older producer) are listed, unclassified."""
+    out: dict = {}
+    for i in items or []:
+        if not isinstance(i, dict) or not i.get("path"):
+            continue
+        row = out.setdefault(str(i["path"]), {"mechanical": {}, "decision": {}, "unclassified": [], "ids": []})
+        line = int(i.get("line") or 0)
+        site = str(i.get("site") or "")
+        if site in MECHANICAL_SITES:
+            row["mechanical"].setdefault(site, []).append(line)
+        elif site:
+            row["decision"].setdefault(site, []).append(line)
+        else:
+            row["unclassified"].append(line)
+        row["ids"].append(str(i.get("id")))
+    for row in out.values():
+        for group in (row["mechanical"], row["decision"]):
+            for k in group:
+                group[k] = sorted(group[k])
+        row["unclassified"].sort()
+        row["ids"].sort()
+    return dict(sorted(out.items()))
+
+
+def obligations_by_file_lines(by_file: dict, limit: int = 30) -> list[str]:
+    """The digest table of obligations_by_file: one line per file with every line number (no grepping needed)."""
+    if not by_file:
+        return []
+    out = ["OBLIGATIONS BY FILE (%d file(s), %d obligation(s); mechanical = remove/replace as the rule says; decision = "
+           "choose the behaviour by the family rule; ids: brief.py --root . --file <path>):"
+           % (len(by_file), sum(len(r["ids"]) for r in by_file.values()))]
+    def fmt(group):
+        return "; ".join("%s L%s" % (k, ",".join(map(str, v))) for k, v in sorted(group.items()))
+    for path, r in list(by_file.items())[:limit]:
+        parts = []
+        if r["mechanical"]:
+            parts.append("mechanical: " + fmt(r["mechanical"]))
+        if r["decision"]:
+            parts.append("DECISION: " + fmt(r["decision"]))
+        if r["unclassified"]:
+            parts.append("unclassified L" + ",".join(map(str, r["unclassified"])))
+        out.append("  %s -- %s" % (path, " | ".join(parts)))
+    if len(by_file) > limit:
+        out.append("  (%d more file(s): brief.py --root . --section objective)" % (len(by_file) - limit))
+    return out
+
+
+def fragment_target_lines(requirement: dict) -> list[str]:
+    """The ONE class a spring-data-fragment-impl requirement is judged on, from the checks' own resolver
+    (requirement_checks._fragment_rows) -- v30 H-6: the recipe prose names the <Fragment>Impl naming contract,
+    while a requirement whose source already implements the fragment is judged on that selected class."""
+    if str((requirement.get("recipe") or {}).get("id") or "") != "spring-data-fragment-impl":
+        return []
+    try:
+        from planner.requirement_checks import _fragment_rows
+        rows = _fragment_rows(requirement)
+    except Exception:  # noqa: BLE001 - no resolution, no line
+        return []
+    if len(rows) != 1:
+        return ["TARGET UNRESOLVED: no single implementation is owed or selected for %s; block the card naming this line"
+                % ((requirement.get("facts") or {}).get("fragment") or requirement.get("id"))]
+    r = rows[0]
+    if r.get("resolution") == "selected":
+        return ["TARGET: the source's selected implementation %s (%s) -- the <Fragment>Impl naming contract does NOT "
+                "apply; annotate THIS class, create no new one" % (r["type"], r["path"])]
+    return ["TARGET: the owed implementation %s (%s), named by the fragment naming contract" % (r["type"], r["path"])]
+
+
+def outcome_unmet(root: Path, board=None, current_tree: str | None = None) -> dict | None:
+    """Why this card's outcome is NOT accepted, in the checks' own words: the unmet checks of the card's latest
+    acceptance record (v30: the deciding detail lived only in a JSON comment). Carries the tree that record
+    measured and whether it is THIS tree (architect review of 49b1c13d: an old record is history, not an
+    instruction about the current tree). None when the latest record accepted the outcome, or there is no
+    record or board."""
+    try:
+        task = os.environ.get("HERMES_KANBAN_TASK") or str((load_issued(root) or {}).get("task_id") or "")
+        board = board if board is not None else (_native_board(root) if task else None)
+        if board is None or not task:
+            return None
+        recs = [r for r in board.records(task) if r.get("kind") in ("accept-commit", "accept-evaluated")]
+    except Exception:  # noqa: BLE001 - an unreadable board leaves the brief as it was
+        return None
+    if not recs or recs[-1].get("outcome_accepted"):
+        return None
+    last = recs[-1]
+    meas = last.get("measurement") or {}
+    unmet = meas.get("unmet_checks") or {}
+    if not isinstance(unmet, dict) or not unmet:
+        return None
+    measured = str(last.get("tree") or meas.get("tree") or "")
+    if current_tree is None:
+        try:
+            current_tree = candidate_sha256(root)
+        except Exception:  # noqa: BLE001
+            current_tree = ""
+    return {"record": last.get("kind"), "run": last.get("run"), "commit": str(last.get("commit") or "")[:12],
+            "measured_tree": measured[:16], "current": bool(measured) and measured == str(current_tree or ""),
+            "checks": {str(k): {"status": str((v or {}).get("status") or ""), "detail": str((v or {}).get("detail") or "")}
+                       for k, v in sorted(unmet.items())}}
+
+
+def _native_board(root: Path):
+    """The native board of this root, or None (the serial loop, or unreadable)."""
+    from planner import native_control as NC
+    from planner.outcome_protocol import select_protocol
+    if not select_protocol(Path(root)).native:
+        return None
+    return NC.board_for(Path(root))
+
+
+def _void_index(root: Path, board=None) -> dict:
+    """The Operator's voids on this card's native board, by EXACT rejection identity (architect review of
+    602f696c: a (cluster, reason) key hid a genuine rejection that shared a voided one's reason).
+
+      voided    {native reject key: why voided}
+      by_run    {(native run, candidate digest): native reject key}
+      reasons   {(cluster, reason[:300])} of voided rejections -- only to flag an identity-less row as
+                unresolved; never to hide one
+    Empty without a readable board: every row stays an attempt."""
+    empty = {"voided": {}, "by_run": {}, "reasons": set()}
+    try:
+        task = os.environ.get("HERMES_KANBAN_TASK") or str((load_issued(root) or {}).get("task_id") or "")
+        board = board if board is not None else (_native_board(root) if task else None)
+        if board is None or not task:
+            return empty
+        rejects = {r["key"]: r for r in board.records(task, "reject")}
+        voided = {str(v.get("reject") or ""): str(v.get("reason") or "") for v in board.records(task, "reject-voided")
+                  if str(v.get("reject") or "") in rejects}
+        return {"voided": voided,
+                "by_run": {(int(r.get("run") or 0), str(r.get("candidate") or "")): k for k, r in rejects.items()},
+                "reasons": {(str(rejects[k].get("cluster") or ""), str(rejects[k].get("reason") or "")[:300]) for k in voided}}
+    except Exception:  # noqa: BLE001 - an unreadable board voids nothing
+        return empty
+
+
+def _void_status(row: dict, index: dict) -> tuple[str, str]:
+    """('voided', why) for a row whose exact native rejection was voided; ('unresolved', why) for an
+    identity-less row whose reason matches a voided rejection (kept visible); ('', '') otherwise."""
+    key = str(row.get("native_reject") or "")
+    if not key and row.get("native_run") and row.get("candidate_sha256"):
+        key = index["by_run"].get((int(row["native_run"]), str(row["candidate_sha256"])), "")
+    if key:
+        return ("voided", index["voided"][key]) if key in index["voided"] else ("", "")
+    if (str(row.get("cluster") or ""), str(row.get("reason") or "")[:300]) in index["reasons"]:
+        return "unresolved", ("a native rejection with this reason was voided, but this row carries no rejection "
+                              "identity to match it: it is kept as an attempt")
+    return "", ""
+
+
+def _clip(value, n: int = 220) -> str:
+    s = value if isinstance(value, str) else json.dumps(value, sort_keys=True)
+    s = " ".join(s.split())                      # a javac message spans lines; one line per item here
+    return s if len(s) <= n else s[:n] + " …"
+
+
+def _governing_budget(root: Path, steps: dict, cluster: str, rk: str) -> dict:
+    """The one budget answer of this card: on a governed native card the
+    issued projection of the native family budget (key, spent, limit); on the
+    legacy serial/v1 loop the loop's own count against decisions.max_attempts."""
+    issued = load_issued(root) or {}
+    nb = issued.get("native_budget") or {}
+    if str(issued.get("budget_authority") or "") == "native" and nb.get("key"):
+        spent, limit = int(nb.get("spent") or 0), int(nb.get("limit") or 0)
+        return {"retry_key": str(nb["key"]), "spent": spent, "limit": limit, "left": max(0, limit - spent),
+                "authority": "native family budget (M2-published)"}
+    return _budget(steps, cluster, rk, int(_max_attempts(root)))
+
+
+def _retry_state(root: Path, steps: dict, cluster: dict, write_set: list, previous: list, rk: str) -> dict:
+    """The one current, actionable account of this card's retries (v24 WP4).
+
+    v23 t_71d9117b: the revert of a rejected candidate deleted the new
+    PetRepositoryImpl.java, the retry re-applied only the other file, and the
+    worker then blocked believing the file existed; the budget it quoted
+    ("2/3") was the loop's deferral count, while the card's contract said
+    "2 of 12". This names the rollback's effect, the write-set files that do
+    not exist, one line per distinct refusal, and every budget with its label.
+    """
+    # the last CONFIRMED rejection drives the guidance; an identity-less row whose reason matches a voided
+    # rejection is history of unresolved standing, never a prohibition (architect re-review of 68152b24)
+    last = next((r for r in reversed(previous) if not r.get("void_status")), {})
+    unresolved = [r for r in previous if r.get("void_status") == "unresolved"]
+    reasons: list = []
+    for r in previous:
+        head = str(r.get("reason") or "").split(":", 1)[0][:80]
+        if reasons and reasons[-1]["refusal"] == head:
+            reasons[-1]["times"] += 1
+        else:
+            reasons.append({"refusal": head, "times": 1})
+    issued = load_issued(root) or {}
+    native = issued.get("native_budget") or {}
+    card = os.environ.get("HERMES_KANBAN_TASK") or str(issued.get("task_id") or "")
+    # v24 (architect decision 2026-09-28): ONE limit. On a governed native card the M2-published
+    # family budget is the limit and the native family accounting the count (rejected candidates
+    # plus reviewer change requests across the family); the issuance gate and the rejection line
+    # show the same numbers. decisions.max_attempts governs only the legacy serial/v1 loop.
+    gb = _governing_budget(root, steps, cluster["id"], rk)
+    budgets = {"family" if native else "loop": dict(gb, shared=bool(native.get("shared")) if native else False,
+                                                    means=("GOVERNS: the M2-published family budget%s; native_gate.py issue "
+                                                           "refuses when it is spent" % (", SHARED by every card of the family"
+                                                                                         if native.get("shared") else "")
+                                                           if native else "legacy loop: advance.py defers at decisions.max_attempts"))}
+    return {
+        "native_run": os.environ.get("HERMES_KANBAN_RUN_ID") or "",
+        "checkpoints_on_this_card": sum(1 for s in steps.get("steps") or [] if isinstance(s, dict) and card and s.get("card") == card
+                                        and s.get("verdict") == "accepted"),
+        "rejected_attempts_listed": len(previous),
+        "last_rejection": ({"card": last.get("card"), "reason": str(last.get("reason") or "")[:300],
+                            "legal_next": last.get("legal_next")} if last else None),
+        "unresolved_history": ({"rows": len(unresolved), "last_reason": str(unresolved[-1].get("reason") or "")[:200]}
+                               if unresolved else None),
+        "deleted_by_last_revert": list(last.get("deleted_by_revert") or []),
+        # v24 run t_e5f21725: after a revert the worker grepped `mvn compile` for its own file and
+        # found nothing (javac prints the first 100 of 231 errors), five identical calls, halted.
+        # The rejection already measured what the patch introduced in the write set; name it here.
+        "introduced_in_write_set": _introduced(last, write_set),
+        "write_set_files_absent": sorted(p for p in write_set if not (root / p).is_file()),
+        "refusals": reasons,
+        "budget": budgets,
+        "history": "previous_attempts holds every rejected patch in full (%d)" % len(previous),
+    }
+
+
+def _introduced(rejection: dict, write_set: list, cap: int = 20) -> list:
+    """The diagnostics a rejected patch introduced in the write set: loci after
+    the patch that were not there before, as "path:line detail" (one line each)."""
+    before = {str(l.get("id")) for l in rejection.get("loci_before") or [] if isinstance(l, dict)}
+    ws = set(write_set)
+    rows = ["%s:%s %s" % (l.get("path"), l.get("line"), _clip(l.get("detail") or "", 160))
+            for l in rejection.get("loci_after") or []
+            if isinstance(l, dict) and l.get("path") in ws and str(l.get("id")) not in before]
+    return rows[:cap] + (["… %d more (previous_attempts)" % (len(rows) - cap)] if len(rows) > cap else [])
+
+
+def _item_line(it: dict) -> str:
+    """One obligation on one line: where, and the unresolved symbol when the compiler named one."""
+    adv = it.get("advice") if isinstance(it.get("advice"), dict) else {}
+    sym = adv.get("symbol") if isinstance(adv.get("symbol"), dict) else {}
+    what = ("%s %s" % (sym.get("kind") or "symbol", sym.get("name"))) if sym.get("name") else \
+        _clip(it.get("message") or it.get("detail") or "", 140)
+    via = " (imported as %s)" % adv["imported_as"] if adv.get("imported_as") else ""
+    own = (" [%s]" % it["ownership"]["label"]) if isinstance(it.get("ownership"), dict) else ""
+    return "    line %s %s: %s%s%s" % (it.get("line"), it.get("rule_id") or it.get("code") or it.get("kind"), what, via, own)
+
+
+def _subject_label(subject) -> str:
+    """A requirement subject, short: the type's simple name (and the member, parameter or edge that
+    follows it). A handler subject carries dotted parameter types, so its last dot is not the type's
+    (v26: `HttpServletResponse)|response` named no handler)."""
+    s = str(subject or "")
+    if "#" in s:
+        typ, rest = s.split("#", 1)
+        return "%s#%s%s" % (typ.rsplit(".", 1)[-1], rest.split("(", 1)[0], ("|" + rest.rsplit("|", 1)[1]) if "|" in rest else "")
+    return s.rsplit(".", 1)[-1]
+
+
+_UNMET_ACTION = {
+    "fail": "REPAIR: the product does not satisfy it on the measured tree",
+    # architect review (A6): an UNKNOWN is not always rerunnable -- a missing producer, an unresolved scope or
+    # ownership, or an unsupported input cannot be supplied by verifying again
+    "unknown": ("VERIFY if its evidence is missing or stale: run-verify.sh --mode acceptance on the current tree, then "
+                "advance.py (no product edit). If the detail names a missing producer, an unresolved scope or "
+                "ownership, or an unsupported input, verifying cannot supply it: kanban_block kind=needs_input naming "
+                "that prerequisite"),
+}
+_HISTORY_ACTION = "HISTORICAL (another tree): an observation, not a current instruction -- verify the current tree first"
+
+
+def outcome_unmet_lines(unmet: dict | None, limit: int = 6) -> list[str]:
+    """The digest lines of outcome_unmet: each deciding check, its state, the action that state calls for
+    (a measured FAIL is product work, missing/stale evidence is verification work, anything else blocks),
+    and its own detail verbatim. A record of another tree is labelled history (architect review of 49b1c13d:
+    "re-verifying an unchanged tree cannot change them" was false for missing measurements)."""
+    if not isinstance(unmet, dict) or not unmet.get("checks"):
+        return []
+    checks = unmet["checks"]
+    when = ("measured on THIS tree %s" % unmet.get("measured_tree")) if unmet.get("current") else (
+        "HISTORY: measured on tree %s, not the current tree -- verify the current tree before acting on it"
+        % (unmet.get("measured_tree") or "unrecorded"))
+    out = ["WHY THE OUTCOME IS NOT ACCEPTED (%s, run %s, commit %s; %s):"
+           % (unmet.get("record"), unmet.get("run"), unmet.get("commit") or "-", when)]
+    for name, row in list(checks.items())[:limit]:
+        st = str(row.get("status") or "?")
+        action = _HISTORY_ACTION if not unmet.get("current") else _UNMET_ACTION.get(
+            st, "BLOCKED: neither a product failure nor missing evidence -- kanban_block kind=needs_input quoting this line")
+        out.append("  - %s [%s] %s: %s" % (name, st, action, _clip(row.get("detail"), 400)))
+    if len(checks) > limit:
+        out.append("  (%d more: brief.py --section outcome_unmet)" % (len(checks) - limit))
+    return out
+
+
+def brief_digest(brief: dict, stem: str) -> str:
+    """A readable digest of a large brief: what to edit, what is owed per file,
+    how the card is judged, and how to read every section in full. Nothing is
+    decided here; the full brief is unchanged on disk."""
+    cl = brief.get("cluster") or {}
+    rs = brief.get("_retry_state") or {}
+    # v30 H-7: "nothing below replaces it" sent workers to read the full brief section by section (30+ --section
+    # calls, ~35 min, never reaching the FIRST ACTION); the digest IS the reading order to act on
+    out = ["BRIEF (digest: act on it from the top -- NEXT ACTION, then any FIRST ACTION; the full %d-character brief is on "
+           "disk and with --json for ONE specific question, not to be read section by section)" % len(json.dumps(brief))]
+    if isinstance(brief.get("issued_not_open"), dict) and brief.get("procedure"):
+        # the one next action of a card whose compile items are gone (the same text as PROCEDURE below)
+        out += ["NEXT ACTION (this card):", textwrap.indent(textwrap.fill(str(brief["procedure"]), 110), "  ")]
+    out += outcome_unmet_lines(brief.get("outcome_unmet"))
+    if rs.get("last_rejection") or rs.get("write_set_files_absent"):
+        out += ["RETRY STATE (read first):"]
+        if rs.get("deleted_by_last_revert"):
+            out.append("  the last revert DELETED: %s -- they are not on the tree now" % ", ".join(rs["deleted_by_last_revert"]))
+        if rs.get("write_set_files_absent"):
+            out.append("  write-set files that do not exist: %s" % ", ".join(rs["write_set_files_absent"]))
+            if (cl.get("not_open") or {}) and brief.get("planned_requirements"):
+                out.append("  the compile items of this cluster are already gone (earlier cards cleared them), but this "
+                           "card's planned requirements remain: implement the REQUIRED SHAPE below inside the write set, "
+                           "including each file the recipe requires, then run-verify.sh and advance.py. Other cards' files are not "
+                           "the specification; the recipe is.")
+        if rs.get("last_rejection"):
+            out.append("  last refusal: %s" % _clip(rs["last_rejection"].get("reason"), 240))
+            out.append("  legal next: %s" % _clip(rs["last_rejection"].get("legal_next"), 240))
+        elif rs.get("unresolved_history"):
+            out.append("  no confirmed current refusal: follow NEXT ACTION and the issued failures")
+        if rs.get("unresolved_history"):
+            uh = rs["unresolved_history"]
+            out.append("  UNRESOLVED history: %d earlier refusal(s), the last '%s', match a rejection the Operator voided "
+                       "as harness-caused, and carry no identity to tell which; they are NOT established product "
+                       "failures, do not prohibit any repair, and their old 'legal next' does not apply"
+                       % (uh["rows"], _clip(uh["last_reason"], 120)))
+        if rs.get("introduced_in_write_set"):
+            out.append("  the rejected patch introduced (in the write set; the reverted tree no longer has them):")
+            out += ["    %s" % r for r in rs["introduced_in_write_set"]]
+        out.append("  refusals so far: %s" % ", ".join("%s x%d" % (r["refusal"], r["times"]) for r in rs.get("refusals") or []))
+    if brief.get("voided_attempts"):
+        out.append("  %d earlier rejection(s) of this family were VOIDED by the Operator as harness-caused; they are not "
+                   "attempts to avoid repeating and are not in previous_attempts" % len(brief["voided_attempts"]))
+    out += _typed_repair.digest_lines(brief.get("typed_repair"))
+    out += scratch_lines(brief)
+    # The catalog already supplies these actions. A section-size index is not
+    # (placed right after RETRY STATE: workers read a brief's head first, and a long REQUIRED SHAPE or
+    # other-diagnostics list must not push the documented action out of it)
+    # an action: omitting them sent workers back to broad catalog/file searches.
+    actions: dict = {}
+    unit_action = (brief.get("unit") or {}).get("first_action")
+    if unit_action:
+        actions[str(unit_action)] = ["coordinated unit"]
+    adv = brief.get("exception_advice") if isinstance(brief.get("exception_advice"), dict) else {}
+    if adv.get("action"):
+        actions.setdefault(str(adv["action"]), []).append("source advice (%s) at %s" % (adv.get("adr"), ", ".join(adv["scenarios"][:3])))
+    obj = brief.get("objective") if isinstance(brief.get("objective"), dict) else {}
+    if obj.get("action"):
+        actions.setdefault(str(obj["action"]), []).append("objective family %s" % obj.get("family"))
+    for i in brief.get("items") or []:
+        action = (i.get("advice") or {}).get("first_action")
+        if action:
+            label = "%s:%s" % (i.get("path"), i.get("line"))
+            if label not in actions.setdefault(str(action), []):
+                actions[str(action)].append(label)
+    if actions:
+        out.append("DOCUMENTED FIRST ACTIONS (from this card's item/unit advice):")
+        for action, sites in actions.items():
+            out.append("  %s: %s" % (", ".join(sites), action))
+    out += obligations_by_file_lines(obj.get("by_file") or {})
+    # the required shape of each planned requirement, before the first edit (v23: the
+    # PetType/Specialty/Visit briefs named @ApplicationScoped and @Typed-to-the-fragment only
+    # inside planned_requirements, which a 64K brief's digest never showed; each card then
+    # spent two refused checkpoints discovering them)
+    ic = brief.get("issued_checks") if isinstance(brief.get("issued_checks"), dict) else None
+    if ic is not None:
+        out.append("CHECKS THIS CARD IS JUDGED BY NOW (its issued contract, %s): %s"
+                   % (ic.get("outcome"), ", ".join(ic.get("checks_now") or []) or "the measured work list only"))
+        if ic.get("other_owners_on_these_paths"):
+            out.append("  %d requirement(s) on these files belong to OTHER cards (owned and judged there, not this card's "
+                       "checks); the diagnostics issued to this card are still this card's to repair, with their "
+                       "documented first actions" % len(ic["other_owners_on_these_paths"]))
+    shared = brief.get("shared_path_diagnostics") or {}
+    if shared.get("items"):
+        out.append("OTHER MEASURED DIAGNOSTICS ON THESE FILES (not in this card's sealed diagnostic set):")
+        out.append("  " + shared["note"])
+        for i in shared["items"][:20]:
+            out.append("  %s: %s; %s" % (i.get("path"), _item_line(i).strip(), i["issuance"]))
+        if len(shared["items"]) > 20:
+            out.append("  remaining facts: --section shared_path_diagnostics or --symbol <name>")
+    shapes = [r for r in brief.get("planned_requirements") or [] if isinstance(r, dict) and (r.get("recipe") or {}).get("architecture")]
+    if shapes:
+        out += ["REQUIRED SHAPE (planned requirements this card owns%s):" % ("" if ic is not None else ", judged by these checks now")]
+        for r in shapes:
+            if ic is not None:
+                now = [c for c in r.get("acceptance") or [] if c in set(ic.get("checks_now") or [])]
+            else:
+                now = [c for c in r.get("acceptance") or [] if str(c).startswith(("unit:", "structure:", "gate:compile", "config:"))]
+            out.append("  %s -- checks now: %s" % (_subject_label(r.get("subject") or r.get("id")), ", ".join(now) or "none"))
+            # the required shape in full (bounded): v24 run t_5d909848 sliced this line by character
+            # columns for 16 minutes looking for the remainder a 420-character clip had cut off
+            arch = " ".join(str(r["recipe"]["architecture"]).split())
+            out.append("    %s: %s" % ((r.get("recipe") or {}).get("id"), arch if len(arch) <= 4000 else arch[:4000]
+                       + " … (the rest: brief.py --root . --section planned_requirements)"))
+            out += ["    " + x for x in fragment_target_lines(r)]
+    # an owned requirement no qualified recipe translates: say so before the first edit, by name
+    # (v26 t_4fd2dcec cycled catalog greps for a Servlet rule that did not exist, then guessed a rename)
+    gaps = [(r, u) for r in brief.get("planned_requirements") or [] if isinstance(r, dict) and r.get("status") == "unresolved"
+            for u in r.get("unknowns") or [] if str(u).startswith("capability gap ")]
+    if gaps:
+        out.append("CAPABILITY GAP (no qualified translation exists; do not search for one and do not guess one -- block "
+                   "the card naming the gap):")
+        out += ["  %s -- %s" % (_subject_label(r.get("subject") or r.get("id")), u) for r, u in gaps]
+    rc = brief.get("resolved_context") if isinstance(brief.get("resolved_context"), dict) else {}
+    if rc.get("index") or rc.get("error"):
+        # V26-3: one line naming the attachment; the context itself is never injected here
+        out.append(str(rc.get("index") or "RESOLVED CONTEXT: unavailable (%s)" % _clip(rc.get("error"), 200)))
+    for name, b in sorted((rs.get("budget") or {}).items()):
+        if isinstance(b, dict):
+            out.append("  budget %s: key %s, %s of %s spent (%s)" % (name, b.get("key"), b.get("spent"), b.get("limit"), b.get("means")))
+        else:
+            out.append("  budget: %s stops first" % b)
+    pr = brief.get("previous_run") if isinstance(brief.get("previous_run"), dict) else None
+    if pr is not None:
+        out.append("PREVIOUS RUN of this card (run %s) ended %s: %s" % (pr.get("run"), pr.get("outcome"), _clip(pr.get("stop"), 200)))
+        kind = pr.get("kind")
+        if kind == "rejected-candidate":
+            out.append("  it was a REJECTED CANDIDATE: advance.py %s its patch (%s). Do not repeat that patch."
+                       % (pr.get("verdict"), _clip(pr.get("rejection") or "reason in the rejected record", 200)))
+        elif kind == "halted-investigation":
+            out.append("  it was a HALTED INVESTIGATION: it was stopped while investigating; no candidate was judged or "
+                       "rejected. Continue from what it learned below, not from the start.")
+        rep = pr.get("repeated")
+        if rep:
+            out.append("  it repeated `%s` %d times (exit %s); %s" % (_clip(rep.get("command"), 160), rep.get("times"),
+                       "/".join(rep.get("exit_codes") or []) or "unknown",
+                       "the recorded complete results were identical" if rep.get("unchanged_result") else
+                       "result equality is unproven; the tail below is not the complete answer"))
+            if rep.get("result_tail") is not None:
+                out.append("  what it returned (last %d of %s characters): %s" % (len(rep["result_tail"]), rep.get("result_chars"),
+                                                                                 " ".join(str(rep["result_tail"]).split())))
+            else:
+                out.append("  what it returned: not recorded (unknown)")
+        st = pr.get("last_loop_step")
+        out.append("  last loop step it completed: %s" % ("%s (exit %s)" % (st["script"], st["exit_code"]) if st else "none recorded"))
+        out.append("  left in the working tree: %s" % (", ".join(pr.get("left_in_tree") or []) or "no product edits"))
+    lv = brief.get("last_verify") if isinstance(brief.get("last_verify"), dict) else None
+    if lv is not None and lv.get("schema") == "rhoai3.last-verify/v2":
+        tests = lv.get("tests")
+        out.append("LAST VERIFICATION (card %s, run %s): procedure %s (exit %s); compilation %s (%s); %s -- the verifier's "
+                   "own record; a filter or echo after run-verify.sh does not change it"
+                   % (lv.get("card") or "?", lv.get("run") or "?", lv.get("procedure") or "?", lv.get("rc"),
+                      str(lv.get("compilation") or "unknown").upper(), lv.get("compilation_detail") or "",
+                      ("tests ran (Maven exit %s)" % lv.get("tests_rc")) if tests == "ran"
+                      else ("tests not run: %s" % lv.get("tests_detail")) if tests == "not-run" else "tests unknown"))
+        vs = brief.get("last_verify_state") or {}
+        if vs.get("state") == "current" and vs.get("reusable"):
+            out.append("  it is %s: that result stands -- do not re-run run-verify.sh until you change the tree "
+                       "(a crashed or halted run does not make it stale)" % vs.get("why"))
+        elif vs.get("state") == "current":
+            out.append("  it is %s, but %s: run run-verify.sh --mode acceptance on this tree now -- no product edit is "
+                       "needed for that" % (vs.get("why"), vs.get("reason")))
+        elif vs.get("state") == "stale":
+            out.append("  it is STALE: %s -- run run-verify.sh after your edit" % vs.get("why"))
+        else:
+            out.append("  whether it is of this tree is unknown: %s" % vs.get("why", "no record"))
+    elif lv is not None:
+        out.append("LAST VERIFICATION: exit %s (%s, card %s, run %s, %s) -- the verifier's own status; a filter piped "
+                   "after run-verify.sh does not change it" % (lv.get("rc"), lv.get("mode"), lv.get("card") or "?",
+                                                               lv.get("run") or "?", lv.get("finished_at") or "?"))
+    out += ["cluster %s  kind %s  path %s" % (cl.get("id"), cl.get("kind"), cl.get("path")),
+           "measure %s   loop-deferral attempts left %s   budget %s" % (_clip((brief.get("measure") or {}).get("tuple") or brief.get("measure"), 80),
+                                                        brief.get("attempts_left"), _clip(brief.get("budget"), 160)),
+           "", "WRITE SET (%d file(s) -- edit only these):" % len(brief.get("write_set") or [])]
+    out += ["  %s" % w for w in brief.get("write_set") or []]
+    by_path: dict = {}
+    for it in brief.get("items") or []:
+        if isinstance(it, dict):
+            by_path.setdefault(str(it.get("path") or "(no path)"), []).append(it)
+    out += ["", "OBLIGATIONS (%d item(s)) by file:" % len(brief.get("items") or [])]
+    # every obligation, one line each (v24 run t_90e674d6: the digest showed 3 of 97 and the
+    # worker spent two runs grepping a 143K items section it could not read whole)
+    shown, cap = 0, 400
+    for path in sorted(by_path):
+        rows = sorted(by_path[path], key=lambda i: (int(i.get("line") or 0) if str(i.get("line") or "").isdigit() else 0))
+        out.append("  %s -- %d item(s)" % (path, len(rows)))
+        for it in rows[:max(0, cap - shown)]:
+            out.append(_item_line(it))
+        shown += len(rows)
+        if shown > cap:
+            out.append("    … the rest: brief.py --root . --file <path> lists every measured obligation at a file")
+            break
+    unit = brief.get("unit")
+    if isinstance(unit, dict):
+        out += ["", "UNIT: " + ", ".join("%s (%s)" % (k, _size(v)) for k, v in sorted(unit.items()))]
+        for key in ("checkpoint", "completion", "acceptance"):
+            if key in unit:
+                out.append("  %s: %s" % (key, _clip(unit[key], 900)))
+    for key in ("procedure", "rule", "stop_rule", "evidence_rule"):
+        if brief.get(key):
+            out += ["", key.upper() + ":", textwrap.indent(textwrap.fill(str(brief[key]), 110), "  ")]
+    out += ["", "SELECT (bounded, read-only, bound to the measured candidate): brief.py --root . --file <path> | "
+                "--item <id> | --symbol <name>"]
+    out += ["", "SECTIONS (read any in full: brief.py --root . --cluster %s --section <key>; "
+                "the whole brief one key per line: verification/loop/%s.txt):" % (cl.get("id"), stem)]
+    out += ["  %-22s %s" % (k, _size(brief[k])) for k in sorted(brief)]
+    return "\n".join(out)
+
+
+SELECT_LIMIT = 80
+
+
+def diagnostic_ownership(doc: dict, root: Path) -> tuple[dict, str]:
+    """Describe issuance, not permission. A shared file is not shared ownership.
+    Newly introduced diagnostics remain for advance.py to judge; absence from
+    the seal never exempts a regression. Unknown/foreign issuance stays unknown."""
+    issued = load_issued(root) or {}
+    task = os.environ.get("HERMES_KANBAN_TASK") or ""
+    if not task or str(issued.get("task_id") or "") != task:
+        return {}, "ownership unknown: no sealed issuance for the current card"
+    own = set(constituents_open(issued, doc))
+    memberships: dict = {}
+    for c in doc.get("clusters") or []:
+        for iid in c.get("items") or []:
+            memberships.setdefault(str(iid), []).append(str(c.get("id") or ""))
+    labels = {}
+    for i in doc.get("items") or []:
+        iid = str(i.get("id") or "")
+        labels[iid] = ("issued to this card %s" % task if iid in own else
+                       "not in this card's sealed diagnostic set; measured cluster(s): %s" %
+                       (", ".join(sorted(memberships.get(iid) or [])) or "unassigned"))
+    return labels, ("issuance: %s / %s; sharing a file does not transfer ownership. "
+                    "This is descriptive: advance.py still judges newly introduced failures; "
+                    "these facts grant no additional write scope." % (task, issued.get("cluster")))
+
+
+def _scenario_files(root: Path, sid: str, mode: str) -> dict:
+    """The source oracle and destination verdict of one scenario, with their response bodies, in ITS mode's
+    directories (ADR-014: the enabled mode keeps its own), as paths relative to the root; only files that exist."""
+    sub = "scenarios" if mode in ("", "disabled") else "scenarios-%s" % mode
+    slug = str(sid).replace(":", "_")
+    cand = {"source_record": "verification/source-oracles/%s/%s.json" % (sub, slug),
+            "source_body": "verification/source-oracles/%s/bodies/%s/response.body" % (sub, slug),
+            "destination_record": "verification/parity/%s/%s.json" % (sub, slug),
+            "destination_body": "verification/parity/%s/_bodies/%s/response.body" % (sub, slug)}
+    return {k: v for k, v in cand.items() if (Path(root) / v).is_file()}
+
+
+def _segment_before(root: Path, sid: str, mode: str) -> list:
+    """The scenarios a scenario's captured state depends on: those before it in its mode's corpus, back to
+    the nearest one that resets before its request (inclusive); [] for a scenario that resets itself."""
+    rel = "verification/scenarios/corpus.json" if mode in ("", "disabled") else "verification/scenarios-%s/corpus.json" % mode
+    try:
+        rows = [sc for sc in json.loads((Path(root) / rel).read_text()).get("scenarios") or [] if isinstance(sc, dict)]
+    except (OSError, ValueError):
+        return []
+    ids = [str(sc.get("id") or "") for sc in rows]
+    if sid not in ids:
+        return []
+    i = ids.index(sid)
+    if rows[i].get("reset_before", True):
+        return []
+    start = i
+    while start > 0 and not rows[start].get("reset_before", True):
+        start -= 1
+    return [{"id": ids[j], "method": rows[j].get("method"), "path": rows[j].get("path"),
+             "reset_before": bool(rows[j].get("reset_before", True))} for j in range(start, i)]
+
+
+def scenario_evidence(root: Path, item: dict) -> list:
+    """The evidence of a parity obligation's scenario, directly (v29 Owner run 89: the worker needed 60 calls
+    to find the two bodies that differed): its security mode, the source and destination records and bodies
+    in that mode, the destination record's candidate binding, the differing subtree, and the scenarios whose
+    state it was captured after. [] for an obligation that names no scenario."""
+    sid = str(item.get("scenario") or "")
+    if not sid:
+        return []
+    mode = str(item.get("security_mode") or "disabled")
+    files = _scenario_files(root, sid, mode)
+    out = ["SCENARIO EVIDENCE %s (%s mode)" % (sid, mode)]
+    for k in ("source_record", "source_body", "destination_record", "destination_body"):
+        out.append("  %s: %s" % (k.replace("_", " "), files.get(k, "(absent)")))
+    rec = {}
+    if files.get("destination_record"):
+        try:
+            rec = json.loads((Path(root) / files["destination_record"]).read_text())
+        except (OSError, ValueError):
+            rec = {}
+    bind = rec.get("binding") if isinstance(rec.get("binding"), dict) else {}
+    out.append("  destination verdict %s, bound to %s %s" % (rec.get("verdict") or "(none)", bind.get("mode") or "nothing",
+                                                           str(bind.get("candidate_sha256") or "")[:12]))
+    diff = ((item.get("advice") or {}).get("body_diff") or {}) if isinstance(item.get("advice"), dict) else {}
+    for d in (diff.get("differences") or [])[:4]:
+        out.append("  differs at %s: %s (observed %s, expected %s)" % (d.get("path"), d.get("kind"),
+                                                                        str(d.get("observed"))[:80], str(d.get("expected"))[:80]))
+    chain = _segment_before(root, sid, mode)
+    if chain:
+        out.append("  captured AFTER (state prerequisites, corpus order): %s" % ", ".join(
+            "%s %s %s" % (c["id"], c["method"], c["path"]) for c in chain))
+    if rec.get("prerequisite_gap"):
+        out.append("  prerequisite not reproduced: %s" % rec["prerequisite_gap"])
+    return out
+
+
+def select_facts(doc: dict, root: Path, *, file: str = "", item: str = "", symbol: str = "",
+                 owners: dict | None = None) -> str:
+    """Bounded, read-only selectors over the MEASURED work list (v24 run: workers grepped a 143K items
+    section and a 100-error mvn output for facts this list already held, and the tool-loop guard halted
+    them). Every answer names the candidate it was measured on and whether the tree on disk is still
+    that candidate, so a query after a revert never describes a discarded candidate as the current tree.
+    An empty answer is stated as an answer."""
+    measured = str(doc.get("candidate_sha256") or "")
+    now = candidate_sha256(root)
+    head = ["measured on candidate %s; the tree on disk %s" % (
+        measured[:12] or "(unrecorded)",
+        "IS that candidate" if measured and measured == now else
+        "is %s -- NOT the measured candidate: run run-verify.sh before relying on these facts" % now[:12])]
+    ownership, ownership_note = diagnostic_ownership(doc, root)
+    head.append(ownership_note)
+    items = [i for i in doc.get("items") or [] if isinstance(i, dict)]
+    if item:
+        hit = next((i for i in items if str(i.get("id")) == item), None)
+        if hit is None:
+            return "\n".join(head + ["no measured obligation %s: it is not reported on the measured candidate" % item])
+        if owners is not None:
+            hit = dict(hit, ownership=ownership_of(hit, owners))
+        return "\n".join(head + [ownership.get(item, "ownership unknown")] + scenario_evidence(root, hit)
+                         + [json.dumps(hit, indent=2, sort_keys=True)[:12000]])
+    def sym(i):
+        adv = i.get("advice") if isinstance(i.get("advice"), dict) else {}
+        return str(((adv.get("symbol") or {}) if isinstance(adv.get("symbol"), dict) else {}).get("name") or "")
+    if file:
+        rel = file.split("/projects/modernized/", 1)[-1].lstrip("./")
+        rows = [i for i in items if str(i.get("path") or "") == rel]
+        what = "at %s" % rel
+    else:
+        rows = [i for i in items if sym(i) == symbol or (symbol and symbol in str(i.get("message") or i.get("detail") or ""))]
+        what = "naming %s" % symbol
+    rows.sort(key=lambda i: (str(i.get("path") or ""), int(i.get("line") or 0) if str(i.get("line") or "").isdigit() else 0))
+    if not rows:
+        return "\n".join(head + ["0 measured obligations %s. That is the answer: the measured work list reports none; "
+                                  "do not re-run this query unchanged." % what])
+    out = head + ["%d measured obligation(s) %s:" % (len(rows), what)]
+    for i in rows[:SELECT_LIMIT]:
+        out.append("  %s %s:%s %s: %s%s" % (i.get("id"), i.get("path"), i.get("line"), i.get("rule_id") or i.get("code") or i.get("kind"),
+                                            _clip(i.get("message") or i.get("detail") or "", 160),
+                                            (" [%s]" % ownership_of(i, owners)["label"]) if owners is not None else ""))
+        out.append("    " + ownership.get(str(i.get("id")), "ownership unknown"))
+    if len(rows) > SELECT_LIMIT:
+        out.append("  … %d more: narrow with --file or --item" % (len(rows) - SELECT_LIMIT))
+    return "\n".join(out)
+
+
+def _size(v) -> str:
+    n = len(json.dumps(v))
+    return "%d item(s), %d chars" % (len(v), n) if isinstance(v, (list, dict)) else "%d chars" % n
+
+
+def advice_guidance(root: Path, items: list) -> dict | None:
+    """ADR-025 (1): the catalog's exception_advice row for the parity items whose SOURCE capture is the
+    advice's response to a request-body read failure (decided from the frozen oracle, never the destination)."""
+    row = (catalog(root).get("exception_advice") or {}).get("request-body-unreadable")
+    if not isinstance(row, dict):
+        return None
+    try:
+        from response_equivalence import deserialization_advice
+    except ImportError:
+        return None
+    hits = []
+    for it in items or []:
+        sid = str((it or {}).get("scenario") or "")
+        if not sid:
+            continue
+        mode = str(it.get("security_mode") or "disabled")
+        slug = re.sub(r"[^A-Za-z0-9._-]+", "_", sid)[:120]
+        base = root / "verification" / "source-oracles" / ("scenarios" + ("" if mode == "disabled" else "-%s" % mode))
+        p = base / (slug + ".json")
+        try:
+            resp = load_json(p).get("response") or {}
+        except (OSError, ValueError, AttributeError):
+            continue
+        ev = resp.get("evidence") if isinstance(resp.get("evidence"), dict) else {}
+        body_p = base / "bodies" / slug / "response.body"
+        cand = [root / str(ev.get("body_file"))] if ev.get("body_file") else []
+        raw = next((c.read_bytes() for c in cand + [body_p] if c.is_file()), None)
+        if raw is not None and deserialization_advice(resp.get("status"), raw, _advice_shapes_of(root)):
+            hits.append(sid)
+    if not hits:
+        return None
+    return {"scenarios": sorted(set(hits)), "adr": row.get("adr"), "action": row.get("action"),
+            "source_semantics": row.get("source_semantics"), "checks": row.get("checks")}
+
+
+def absent_result_semantics(root: Path) -> str:
+    """compat-mapping repository_behaviour.query_result_semantics as one line: what a READ member answers for no
+    row (M-3 2026-09-30: a bare getSingleResult answered 500 where Spring Data's null gave the source's 404)."""
+    q = (catalog(root).get("repository_behaviour") or {}).get("query_result_semantics") or {}
+    return " ".join("%s: %s." % (k.replace("_", " "), " ".join(str(q[k]).split())) for k in ("single_entity", "optional", "collection")
+                    if q.get(k))
+
+
+def behaviour_brief(row: dict, absent: str = "") -> dict:
+    """V17-3: what each owed fragment member must DO, as sealed on the
+    obligation (worklist.fragment_behaviour_rows): the selected source
+    behaviour per member -- the override fragment's method, the repository's
+    @Query, the base repository's CRUD semantics or a derived query -- with any
+    persistence translation it needs, the implementations that are NOT the
+    behaviour source (another profile's), and the functional evidence that
+    will judge it. {} for an obligation that carries none."""
+    beh = row.get("behaviour") if isinstance(row.get("behaviour"), dict) else None
+    if beh is None:
+        return {}
+    members = []
+    for m in beh.get("members") or []:
+        if not isinstance(m, dict):
+            continue
+        kind = str(m.get("kind") or "")
+        if kind == "query":
+            what = "run the source's @Query %s%s" % ("; ".join(str(q) for q in m.get("query") or []),
+                                                     " (a @Modifying update)" if m.get("modifying") else "")
+        elif kind == "source-override":
+            what = "port the BEHAVIOUR of %s (%s)" % (m.get("source"), m.get("path"))
+        elif kind == "crud-default":
+            what = "Spring Data's %s: %s" % (m.get("source"), m.get("semantics"))
+        elif kind == "derived-query":
+            what = "the query Spring Data derives from the name %s" % str(m.get("signature") or "").split("(", 1)[0]
+        else:
+            what = "UNRESOLVED: %s -- stop and report it (kanban_block needs_input); do not guess" % (m.get("why") or "no source behaviour")
+        entry = {"member": m.get("signature"), "behaviour": kind, "source": m.get("source"), "do": what,
+                 "effect": m.get("effect") or ""}
+        if absent and str(m.get("effect") or "") == "read" and kind in ("query", "derived-query", "crud-default"):
+            entry["absent_result"] = absent
+        if m.get("translations"):
+            entry["translations"] = [{"id": t.get("id"), "obligation": t.get("obligation"), "calls": t.get("calls")}
+                                     for t in m["translations"] if isinstance(t, dict)]
+        members.append(entry)
+    out = {"behaviour": {"repository": beh.get("repository") or "", "members": members,
+                         "not_behaviour_sources": [{"type": n.get("type"), "path": n.get("path"), "why": n.get("why")}
+                                                   for n in beh.get("not_behaviour_sources") or [] if isinstance(n, dict)],
+                         "unknowns": list(beh.get("unknowns") or [])}}
+    if members:
+        out["required_behaviour"] = (
+            "every owed member carries the SELECTED source behaviour above (the decided build profiles' repository, "
+            "never an implementation gated to another profile -- those are listed as NOT the behaviour source). A body "
+            "that only throws, does nothing, returns a placeholder, or delegates to a helper that does is refused at the "
+            "checkpoint (unit:fragment-behaviour-bodies). Port behaviour, not text: where a translation is listed, the "
+            "destination's persistence provider does not preserve the literal source order")
+    ver = [v for v in row.get("verification") or [] if isinstance(v, dict)]
+    if ver:
+        out["functional_evidence"] = {
+            "rows": [{"member": v.get("member"), "effect": v.get("effect"), "scenarios": v.get("scenarios"),
+                      "status": v.get("status"), "needs": v.get("needs")} for v in ver],
+            "note": ("structural acceptance at this checkpoint is NOT functional completion: the effects are proven by the "
+                     "listed scenarios through the generated repository (reads, and writes read back in a later request); "
+                     "an unresolved row stays an open verification debt owned by this unit, never a PASS")}
+    return out
+
+
+LOOP_STEP_SCRIPTS = ("brief.py", "run-verify.sh", "advance.py", "native_gate.py", "restore-pending.py", "amend-scope.py")
+ENDED_WITHOUT_HANDOFF = ("crashed", "gave_up", "blocked", "timed_out", "spawn_failed", "reclaimed")
+
+
+REJECTING_VERDICTS = ("REVERTED", "DEFERRED")
+RESULT_TAIL = 400
+
+
+def previous_run_context(runs: list, ledger: list, current_run: str, dirty: list, *, task: str = "",
+                         last_advance: dict | None = None, rejected: list | None = None) -> dict | None:
+    """V26-6 item 2: what the previous native run of THIS card did before it stopped, from
+    existing records only -- the native run row (outcome, stop reason), the execution
+    ledger (the call it repeated with the bounded output the observer kept, the last loop
+    step it completed and how), advance.py's receipt (whether a candidate was judged) and
+    the working tree (edits left behind). None when there is no earlier run that ended
+    without a handoff. Missing records stay unknown; nothing is inferred.
+
+    kind separates the two retries that need different next steps:
+      rejected-candidate    advance.py judged this run's candidate and REVERTED/DEFERRED it
+                            (its receipt names this card and run)
+      halted-investigation  the run was stopped (a guardrail, a crash) without a judged
+                            candidate: nothing was rejected, the reading was cut off
+      ended                 neither is recorded"""
+    try:
+        cur = int(current_run or 0)
+    except ValueError:
+        cur = 0
+    prev = [r for r in runs if isinstance(r, dict) and int(r.get("id") or 0) < cur
+            and str(r.get("outcome") or "") in ENDED_WITHOUT_HANDOFF]
+    if not prev:
+        return None
+    last = prev[-1]
+    rid = str(last.get("id"))
+    rows = [r for r in ledger if isinstance(r, dict) and str(r.get("run") or "") == rid]
+    starts = [r for r in rows if r.get("phase") == "start"]
+    ends = {str(r.get("tool_call_id") or ""): r for r in rows if r.get("phase") == "end"}
+    # Preserve operands: a number may identify a different file, range or diagnostic.
+    # Repetition is history, never permission to skip a read or an acceptance gate.
+    def shape(c: str) -> str:
+        return c
+    counts: dict = {}
+    latest_of: dict = {}
+    for r in starts[-15:]:
+        c = str(r.get("command") or "")
+        counts[shape(c)] = counts.get(shape(c), 0) + 1
+        latest_of[shape(c)] = c
+    repeated = None
+    if counts:
+        key, times = max(counts.items(), key=lambda kv: kv[1])
+        cmd = latest_of[key]
+        if times >= 3:
+            calls = [ends.get(str(r.get("tool_call_id") or "")) for r in starts if shape(str(r.get("command") or "")) == key]
+            exits = sorted({str((e or {}).get("exit_code")) for e in calls})
+            done = [e for e in calls if isinstance(e, dict)]
+            tail = done[-1].get("output_tail") if done else None
+            complete = (len(done) == len(calls) and bool(done)
+                         and all(re.fullmatch(r"[a-f0-9]{64}", str(e.get("output_sha256") or ""))
+                                 and type(e.get("output_chars")) is int and e["output_chars"] >= 0
+                                 and type(e.get("exit_code")) is int for e in done))
+            unchanged = complete and len({(e["output_sha256"], e["output_chars"], e["exit_code"]) for e in done}) == 1
+            repeated = {"command": cmd[:240], "times": times, "exit_codes": exits,
+                        "unchanged_result": unchanged,
+                        "result_tail": tail[-RESULT_TAIL:] if isinstance(tail, str) else None,
+                        "result_chars": done[-1].get("output_chars") if done else None}
+    step = None
+    for r in reversed(starts):
+        c = str(r.get("command") or "")
+        hit = next((sname for sname in LOOP_STEP_SCRIPTS if sname in c), None)
+        if hit:
+            code = (ends.get(str(r.get("tool_call_id") or "")) or {}).get("exit_code")
+            step = {"script": hit, "exit_code": "unknown" if code is None else code}
+            break
+    stop = str(last.get("error") or last.get("summary") or "")
+    la = last_advance if isinstance(last_advance, dict) else {}
+    judged = (str(la.get("card") or "") == task and str(la.get("run") or "") == rid
+              and str(la.get("verdict") or "") in REJECTING_VERDICTS)
+    if judged:
+        kind = "rejected-candidate"
+        why = next((str(r.get("reason") or "") for r in reversed(rejected or [])
+                    if isinstance(r, dict) and str(r.get("card") or "") == task), "")
+    elif "WORKER_TOOL_LOOP" in stop or "guardrail" in stop or str(last.get("outcome") or "") == "crashed":
+        kind, why = "halted-investigation", ""
+    else:
+        kind, why = "ended", ""
+    return {"run": rid, "task": task, "outcome": str(last.get("outcome") or ""), "stop": stop[:300], "kind": kind,
+            "verdict": str(la.get("verdict") or "") if judged else "", "rejection": why[:300],
+            "repeated": repeated, "last_loop_step": step, "left_in_tree": list(dirty)[:10]}
+
+
+def verification_state(record: dict | None, task: str, candidate_now: str) -> dict:
+    """Whether the verifier's own latest record is evidence about THIS card's tree NOW:
+    current (same card, finished, same candidate digest), stale (the tree changed since)
+    or unknown (no record, another card, unfinished, or a record without a digest)."""
+    if not isinstance(record, dict) or str(record.get("card") or "") != task or not task:
+        return {"state": "unknown", "why": "no verifier record of this card"}
+    if record.get("status") not in (None, "finished"):
+        return {"state": "unknown", "why": "its latest verification did not record a finish (interrupted)"}
+    was = str(record.get("candidate_sha256") or "")
+    if not was or not candidate_now:
+        return {"state": "unknown", "why": "the record names no candidate digest"}
+    if was != candidate_now:
+        return {"state": "stale", "why": "the tree changed since (verified %s, now %s)" % (was[:12], candidate_now[:12])}
+    # current is about FRESHNESS; whether the result can stand in for the next step is separate
+    # (architect review F2): only a completed ACCEPTANCE procedure is a measurement advance.py
+    # can judge. A failed procedure or a diagnostic-only pass on this same tree calls for the
+    # acceptance verification again -- no product edit is needed for that. Missing fields are
+    # not a reason to forbid anything.
+    why = "of this tree (candidate %s)" % was[:12]
+    if record.get("procedure") == "completed" and record.get("mode") == "acceptance":
+        return {"state": "current", "reusable": True, "why": why}
+    if record.get("procedure") not in (None, "completed"):
+        reason = "its procedure did not complete (exit %s)" % record.get("rc")
+    elif record.get("mode") not in (None, "acceptance"):
+        reason = "it was a %s verification, not the acceptance measurement" % record.get("mode")
+    else:
+        reason = "the record does not say whether it was a completed acceptance measurement"
+    return {"state": "current", "reusable": False, "why": why, "reason": reason}
+
+
+def _previous_run(root: Path) -> dict | None:
+    board = _outcome_bridge._native(root)
+    task, run = _outcome_bridge._ids()
+    if board is None or not task:
+        return None
+    try:
+        runs = board.native.runs(task)
+    except Exception:
+        return None
+    home = (os.environ.get("HERMES_HOME") or "").rstrip("/")
+    parent, name = os.path.split(home)
+    base, profiles = os.path.split(parent)
+    home = base if profiles == "profiles" and name and base else home
+    ledger = []
+    if home:
+        lp = Path(home) / "kanban" / "logs" / ("%s.exec.jsonl" % task)
+        if lp.is_file():
+            for line in lp.read_text(encoding="utf-8", errors="replace").splitlines():
+                try:
+                    ledger.append(json.loads(line))
+                except ValueError:
+                    continue
+    try:
+        dirty = product_paths_changed(root)
+    except Exception:
+        dirty = []
+    try:
+        la = load_json(root / LOOP_DIR / "last-advance.json")
+    except (OSError, ValueError):
+        la = None
+    try:
+        rejected = (load_json(root / LOOP_DIR / "steps.json") or {}).get("rejected") or []
+    except (OSError, ValueError, AttributeError):
+        rejected = []
+    return previous_run_context(runs, ledger, str(run), dirty, task=task, last_advance=la, rejected=rejected)
+
+
+def issued_ownership(root: Path) -> dict | None:
+    """On an outcome-board/v2 card: the outcome this task is, the requirements
+    it owns and the checks it is judged by now (the plan node the issued
+    contract was attached from). None off the native board."""
+    board = _outcome_bridge._native(root)
+    if board is None:
+        return None
+    try:
+        from planner import native_control as NC
+        task, _run = _outcome_bridge._ids()
+        _role, _run_id, oid, _plan, node = NC.node_context(board, task)
+    except Exception:
+        return None
+    return {"outcome": oid, "requirements": {str(r) for r in node.get("requirements") or []},
+            "checks_now": sorted(str(c) for c in ((node.get("acceptance") or {}).get("requirement_checks") or []))}
+
+
+def _context_plan(root: Path, cluster: dict, write_set: list) -> tuple[dict, dict, str]:
+    """(plan, node, where the plan was read) for the resolved context: the native plan node of THIS card on
+    an outcome-board/v2 board; off it, the plan-semantics requirements on the write set projected as one node
+    (the same selection planned_requirements makes without an owner)."""
+    board = _outcome_bridge._native(root)
+    if board is not None:
+        from planner import native_control as NC
+        task, _run = _outcome_bridge._ids()
+        _role, run_id, _oid, plan, node = NC.node_context(board, task)
+        return plan, node, "kanban:plan/%s/r%s" % (run_id, plan.get("revision"))
+    from planner.paths import PLAN_SEMANTICS
+    p = root / PLAN_SEMANTICS
+    reqs = list(((load_json(p).get("plan") or {}).get("requirements") or []) if p.is_file() else [])
+    mine = sorted(str(r.get("id")) for r in reqs if isinstance(r, dict) and r.get("status") in ("applicable", "unresolved")
+                  and set(r.get("paths") or []) & set(write_set))
+    return {"requirements": reqs}, {"outcome_id": str(cluster.get("id") or ""), "requirements": mine}, PLAN_SEMANTICS.as_posix()
+
+
+def resolved_context(root: Path, cluster: dict, write_set: list, worklist: dict) -> dict:
+    """V26-3: build this card's resolved context (planner.resolved_context) on the current product tree and
+    write it BESIDE the brief (verification/loop/context-<cluster>.json). The brief keeps only this index --
+    the path, the tree and the counts -- and the digest one line: the context is read on demand, never
+    injected. A build fault is shown, never hidden as "no context"."""
+    from planner import resolved_context as RC
+    from planner.canonical import product_tree_sha256
+    try:
+        plan, node, ref = _context_plan(root, cluster, write_set)
+        tree = product_tree_sha256(root)
+        ctx = RC.build(root, plan, node, worklist, tree, plan_ref=ref)
+        rel = (LOOP_DIR / ("context-%s.json" % str(cluster.get("id") or "").replace(":", "-"))).as_posix()
+        write_canonical(root / rel, ctx)
+        return {"path": rel, "tree": tree, "counts": RC.counts(ctx), "index": RC.index_line(ctx, rel)}
+    except Exception as exc:
+        return {"error": "resolved context failed: %s" % exc}
+
+
+def diagnostic_owners(root: Path) -> dict | None:
+    """On an outcome-board/v2 card: who owns each planned obligation (the plan ownership map and every
+    node's obligations), which of them THIS card owns (native_control.owned, the same set its acceptance
+    measures), and each owner's task and status. None off the native board: no ownership is claimed there."""
+    board = _outcome_bridge._native(root)
+    if board is None:
+        return None
+    try:
+        from planner import native_control as NC
+        task, _run = _outcome_bridge._ids()
+        _role, run_id, oid, plan, node = NC.node_context(board, task)
+        rows = board.run_tasks(run_id)
+    except Exception:
+        return None
+    owners = {str(k): str(v) for k, v in (plan.get("ownership") or {}).items()}
+    for n in plan.get("nodes") or []:
+        for ob in n.get("obligations") or []:
+            owners.setdefault(str(ob), str(n.get("outcome_id") or ""))
+    return {"self": oid, "task": task, "mine": {str(x) for x in NC.owned(plan, node)}, "owners": owners,
+            "tasks": {k: {"id": str(v.get("id") or ""), "status": str(v.get("status") or "")} for k, v in rows.items()}}
+
+
+def ownership_of(item: dict, ctx: dict) -> dict:
+    """Whose obligation one measured diagnostic is, and whether it blocks THIS card's acceptance. Descriptive
+    only: it grants no write scope, and another owner's diagnostic is never this card's to repair."""
+    iid = str(item.get("id") or "")
+    if item.get("category") != "mandatory":
+        return {"owner": "", "blocks_this_card": False, "label": "not an acceptance obligation: does not block this card"}
+    if iid in ctx["mine"]:
+        return {"owner": ctx["self"], "card": ctx["task"], "blocks_this_card": True,
+                "label": "this card owns it: blocks this card until it is gone"}
+    owner = ctx["owners"].get(iid, "")
+    if owner:
+        t = ctx["tasks"].get(owner) or {}
+        return {"owner": owner, "card": t.get("id", ""), "card_status": t.get("status", ""), "blocks_this_card": False,
+                "label": "owned by %s (card %s, %s): not this card to repair; it does not block the obligations this card owns "
+                         "-- if it prevents your acceptance, say so naming that owner"
+                         % (owner, t.get("id") or "unknown", t.get("status") or "status unknown")}
+    return {"owner": "", "blocks_this_card": None,
+            "label": "owner unresolved: the plan names no owner (it may be new on this candidate); advance.py "
+                     "judges it through the measure"}
+
+
+def planned_owed_next(cid: str, write_set: list, planned: list, own: dict | None, root: Path) -> str:
+    """The one next action of an issued card whose compile items are gone while its planned requirements are
+    still owed (architect review 2026-09-29, G2): what is owed, where, by which shape, and how it is judged."""
+    subjects = ", ".join(_subject_label(r.get("subject") or r.get("id")) for r in planned[:6])
+    if own is not None:
+        checks = list(own.get("checks_now") or [])
+    else:
+        checks = sorted({str(c) for r in planned for c in r.get("acceptance") or []
+                         if str(c).startswith(("unit:", "structure:", "gate:compile", "config:"))})
+    absent = [w for w in write_set if not (root / w).exists()]
+    return ("The compile items issued to this card are no longer reported (earlier cards may have cleared them), but "
+            "this card still owes its planned requirement(s): %s. Make the write set satisfy the REQUIRED SHAPE this "
+            "brief shows for them, editing only these files: %s.%s They are judged by: %s. Then run `bash "
+            ".hermes/skills/migration/fix-until-green/scripts/run-verify.sh --root . --mode acceptance` and `python3 "
+            ".hermes/skills/migration/fix-until-green/scripts/advance.py --root . --cluster %s --card "
+            "$HERMES_KANBAN_TASK`; only its verdict establishes completion. If the tree already satisfies them, those two "
+            "commands are the whole step. Other cards' files are not the specification; the recipe is. Do not repair "
+            "another card's diagnostics just because they share a file. Do not kanban_block for this."
+            % (subjects, ", ".join(write_set) or "(none)",
+               (" Write-set files that do not exist yet: %s (a missing path alone does not prove the file is "
+                "required: write one only where the REQUIRED SHAPE names it)." % ", ".join(absent)) if absent else "",
+               ", ".join(checks) or "the measured work list", cid))
+
+
+def typed_repair_section(root: Path, cluster: dict, write_set: list, own: dict | None) -> dict | None:
+    """V26-1: the typed repair requests for THIS unit (catalog `typed-repair` rows, from its sealed scope and
+    the requirements it owns), the FIRST ACTION while one has no current record, and the unresolved reason
+    that returns the unit to the bounded agent procedure. Descriptive: the executor itself re-plans."""
+    try:
+        ref = cluster.get("batch_scope") or {}
+        sp = root / str(ref.get("path") or "") if ref.get("path") else None
+        scope = load_json(sp) if sp is not None and sp.is_file() else None
+        cat = catalog(root)
+        requests, skipped = _typed_repair.plan(root, scope, write_set, _typed_repair.owned_requirements(root, write_set, own), cat)
+        return _typed_repair.brief_section(root, str(cluster.get("id") or ""), requests, skipped, cat)
+    except Exception as exc:  # a planning fault is shown, never hidden as "no typed repair"
+        return {"error": "typed repair planning failed: %s" % exc}
+
+
+def planned_requirements(root: Path, write_set: list[str], own: dict | None = None) -> list[dict]:
+    """Plan semantics v1: the source requirements admission planned for these
+    files (evidence/planning/plan-semantics.json), each with its qualified
+    recipe -- the fixed architecture and the mechanical checks that will judge
+    it. Descriptive: the write set above is the only grant, and a run admitted
+    without the decision has no such file, so its brief is unchanged.
+
+    On a native card (own given) only the requirements the card OWNS are listed;
+    sharing a file with another owner's requirement does not make it this card's."""
+    from planner.paths import PLAN_SEMANTICS
+    from planner.source_requirements import recipes_of
+
+    p = root / PLAN_SEMANTICS
+    if not p.is_file() or not write_set:
+        return []
+    try:
+        doc = load_json(p)
+    except (OSError, ValueError):
+        return []
+    recipes = recipes_of(catalog(root))
+    out = []
+    for r in ((doc.get("plan") or {}).get("requirements") or []):
+        if not isinstance(r, dict) or r.get("status") not in ("applicable", "unresolved"):
+            continue
+        if own is not None:
+            if str(r.get("id")) not in own["requirements"]:
+                continue
+        elif not set(r.get("paths") or []) & set(write_set):
+            continue
+        rec = recipes.get(str((r.get("recipe") or {}).get("id") or ""))
+        out.append({"id": r["id"], "status": r["status"], "subject": r.get("subject"),
+                    "recipe": ({"id": (r.get("recipe") or {}).get("id"), "version": rec.get("version"),
+                                "architecture": (rec.get("implementation") or {}).get("architecture"),
+                                "refuse_when": rec.get("refuse") or []} if rec else None),
+                    "acceptance": list(r.get("acceptance") or []), "unknowns": list(r.get("unknowns") or []),
+                    "note": "planned from the frozen source before any failure; judged by the checks named here, not by the "
+                            "diagnostic disappearing"})
+    return out
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

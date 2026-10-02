@@ -1,0 +1,70 @@
+{
+  "kind": "m2-plan",
+  "artifact": "m2-admission",
+  "steps": [
+    {
+      "id": "assert-planner-activated",
+      "backing": "native",
+      "native": "assert-planner-activated.py",
+      "note": "Activation gate (SAD v3 \u00a79). Refuses while .hermes/pins.json planner.activation is not-activated (or a pilot seal does not cover this bundle): kanban_block naming the gate; do not improvise a plan."
+    },
+    {
+      "id": "bootstrap-destination",
+      "backing": "skill",
+      "skill": "bootstrap-destination",
+      "keep": [
+        "evidence/producers/bootstrap.json"
+      ],
+      "note": "Deterministic baseline from the compat-mapping catalog + pins (import, pom, properties, main class) and the decided effective datasource (decisions.yaml datasource, under an accepted ADR). No model. Then run scripts/check-datasource-decision.py: the destination's unprefixed datasource keys, its JDBC extension and its schema/seed assets must be the decided ones, because the platform resolves the datasource at BUILD time and a %profile-prefixed key alone is not a configured datasource."
+    },
+    {
+      "id": "build-worklist",
+      "backing": "skill",
+      "skill": "build-worklist",
+      "keep": [
+        "evidence/planning/worklist.json",
+        "verification/loop/steps.json"
+      ],
+      "note": "The only plan: JDK diagnostics + surefire + MTA rescan \u2192 clustered, ordered work list; records the baseline step."
+    },
+    {
+      "id": "admit-migration-plan",
+      "backing": "skill",
+      "skill": "admit-migration-plan",
+      "producer": true,
+      "keep": [
+        "evidence/planning/admission-receipt.json"
+      ]
+    },
+    {
+      "id": "k4-mint",
+      "backing": "kernel",
+      "kernel": "k4_mint.py",
+      "note": "From an ADMITTED receipt only (zero commands otherwise; INCONCLUSIVE is a legal stop: kanban_block kind=needs_input naming the BLOCK classes). outcome-board/v2: publishes the whole known plan as native cards (every outcome, M4, the three M5 stages) under this open card, attaches plan.r1.json here and contract.json to each, and prints created_cards. serial-loop/v1: mints exactly one card, the head cluster (or M4 VERIFY when the list is empty).",
+      "require_args": [
+        "--exec"
+      ]
+    },
+    {
+      "id": "handoff-facts",
+      "backing": "native",
+      "native": "handoff_facts.py",
+      "keep": [
+        "evidence/handoff/m2-facts.json"
+      ],
+      "require_args": [
+        "--write"
+      ],
+      "note": "The handoff's counts and classifications, computed from sealed artifacts: repair outcomes versus milestones on the published plan (the newest plan.r<N>.json native attachment), requirement counts, and the unresolved verification responsibilities (groups, requirements, entry points, what they block), bound to the admission receipt the plan was published under. Run with --write; it prints the metadata block the review request carries verbatim (facts, factual_summary, unresolved), bound to this task and run. Under the reviewer profile this audit compares the current handoff with the facts recomputed from the sealed artifacts: missing or different facts refuse."
+    },
+    {
+      "id": "verify-live-kanban-loop",
+      "backing": "skill",
+      "skill": "verify-live-kanban-loop",
+      "keep": [
+        "evidence/receipts/k3/live-board.json"
+      ],
+      "note": "outcome-board/v2: the live board equals the published plan revision (the native read-back: keys, bodies, dependencies, contracts). serial-loop/v1: the live board equals the loop's expected cards."
+    }
+  ]
+}
