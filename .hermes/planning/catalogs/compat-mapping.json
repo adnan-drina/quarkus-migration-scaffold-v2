@@ -1,0 +1,1402 @@
+{
+  "schema": "rhoai3.catalog.compat-mapping/v1",
+  "note": "Deterministic bootstrap for the Spring-compatibility path (SAD v3 §6). Every row is a documented Quarkus mapping, never an inference: starters map to the Quarkus Spring compatibility extensions and their runtime prerequisites; property keys map per the quarkus-spring-boot-properties and hibernate-orm guides. Versions are never here: the BOM and plugin come from .hermes/pins.json (quarkus_platform, compiler_plugin, surefire_plugin). A starter or driver without a row stays in the pom and is surfaced by the compiler and the MTA rescan as work-list items; nothing is guessed.",
+  "sources": [
+    "https://quarkus.io/guides/spring-di",
+    "https://quarkus.io/guides/spring-web",
+    "https://quarkus.io/guides/spring-data-jpa",
+    "https://quarkus.io/guides/spring-security",
+    "https://quarkus.io/guides/spring-cache",
+    "https://quarkus.io/guides/spring-scheduled",
+    "https://quarkus.io/guides/spring-boot-properties",
+    "https://quarkus.io/guides/hibernate-orm",
+    "https://quarkus.io/guides/datasource",
+    "https://quarkus.io/guides/getting-started-testing",
+    "https://quarkus.io/guides/logging",
+    "https://quarkus.io/guides/migrate-to-quarkus-3",
+    "https://quarkus.io/version/3.27/guides/rest"
+  ],
+  "parent_to_remove": {
+    "group_id": "org.springframework.boot",
+    "artifact_id": "spring-boot-starter-parent"
+  },
+  "plugin_to_remove": {
+    "group_id": "org.springframework.boot",
+    "artifact_id": "spring-boot-maven-plugin"
+  },
+  "plugin_to_add": {
+    "pin_key": "quarkus_platform",
+    "artifact_id_key": "plugin_artifact_id",
+    "goals": [
+      "build",
+      "generate-code",
+      "generate-code-tests"
+    ],
+    "extensions": true
+  },
+  "bom": {
+    "pin_key": "quarkus_platform"
+  },
+  "always_add": [
+    "quarkus-arc",
+    "quarkus-rest",
+    "quarkus-spring-di"
+  ],
+  "starters": {
+    "org.springframework.boot:spring-boot-starter": [
+      "quarkus-spring-di"
+    ],
+    "org.springframework.boot:spring-boot-starter-web": [
+      "quarkus-spring-web",
+      "quarkus-rest-jackson"
+    ],
+    "org.springframework.boot:spring-boot-starter-data-jpa": [
+      "quarkus-spring-data-jpa",
+      "quarkus-hibernate-orm"
+    ],
+    "org.springframework.boot:spring-boot-starter-validation": [
+      "quarkus-hibernate-validator"
+    ],
+    "org.springframework.boot:spring-boot-starter-security": [
+      "quarkus-spring-security"
+    ],
+    "org.springframework.boot:spring-boot-starter-cache": [
+      "quarkus-spring-cache"
+    ],
+    "org.springframework.boot:spring-boot-starter-actuator": [
+      "quarkus-smallrye-health"
+    ],
+    "org.springframework.boot:spring-boot-starter-test": [
+      "assertj-core",
+      "quarkus-junit5",
+      "rest-assured"
+    ],
+    "org.springframework.boot:spring-boot-starter-json": [
+      "quarkus-rest-jackson"
+    ],
+    "org.springframework.boot:spring-boot-starter-jdbc": [
+      "quarkus-agroal"
+    ],
+    "org.springframework.boot:spring-boot-devtools": [],
+    "org.springframework.boot:spring-boot-starter-aop": []
+  },
+  "starter_group_ids": {
+    "rest-assured": "io.rest-assured",
+    "quarkus-test-security": "io.quarkus",
+    "assertj-core": "org.assertj"
+  },
+  "jdbc_drivers": {
+    "org.postgresql:postgresql": "quarkus-jdbc-postgresql",
+    "com.h2database:h2": "quarkus-jdbc-h2",
+    "com.mysql:mysql-connector-j": "quarkus-jdbc-mysql",
+    "mysql:mysql-connector-java": "quarkus-jdbc-mysql",
+    "org.mariadb.jdbc:mariadb-java-client": "quarkus-jdbc-mariadb"
+  },
+  "remove_dependencies_matching_group": [
+    "org.springframework.boot"
+  ],
+  "properties": {
+    "spring.datasource.url": "quarkus.datasource.jdbc.url",
+    "spring.datasource.username": "quarkus.datasource.username",
+    "spring.datasource.password": "quarkus.datasource.password",
+    "spring.datasource.driver-class-name": null,
+    "spring.jpa.show-sql": "quarkus.hibernate-orm.log.sql",
+    "spring.jpa.hibernate.ddl-auto": "quarkus.hibernate-orm.database.generation",
+    "spring.jpa.properties.hibernate.dialect": null,
+    "server.port": "quarkus.http.port",
+    "server.servlet.context-path": "quarkus.http.root-path",
+    "spring.application.name": "quarkus.application.name",
+    "spring.sql.init.mode": null,
+    "spring.jpa.open-in-view": null,
+    "spring.profiles.active": null
+  },
+  "property_values": {
+    "quarkus.hibernate-orm.database.generation": {
+      "create-drop": "drop-and-create",
+      "create": "drop-and-create",
+      "update": "update",
+      "validate": "validate",
+      "none": "none"
+    }
+  },
+  "main_class": {
+    "annotation": "org.springframework.boot.autoconfigure.SpringBootApplication",
+    "action": "delete-file",
+    "note": "Quarkus has no application main class on the compat path; the file is deleted and recorded in the bootstrap receipt."
+  },
+  "maven_settings": {
+    "profile": "red-hat-enterprise-maven-repository",
+    "reason": "Red Hat build of Quarkus artifacts (com.redhat.quarkus.platform:*-redhat-*) are published on the Red Hat GA repository, not Maven Central",
+    "source": "https://docs.redhat.com/en/documentation/red_hat_build_of_quarkus/3.27/html/getting_started_with_red_hat_build_of_quarkus/proc_configuring-maven-settings_quarkus-getting-started (Configuring the Maven settings.xml file for the online repository)"
+  },
+  "starter_notes": {
+    "org.springframework.boot:spring-boot-starter-aop": "No Quarkus Spring-compatibility extension covers Spring AOP (the quarkus.io Spring guides list DI, Web, Data JPA, Security, Cache, Scheduled, Boot properties only). The starter is dropped; every @Aspect / org.aspectj use is either retired by an ADR (decisions.yaml retired_sources) or surfaced by the compiler as a work-list item for a CDI-interceptor rewrite. Nothing is guessed."
+  },
+  "property_prefixes": {
+    "logging.level.": {
+      "to": "quarkus.log.category.\"{rest}\".level",
+      "source": "https://quarkus.io/guides/logging#logging-categories (MTA rule springboot-properties-to-quarkus-00003 links the same guide)"
+    }
+  },
+  "artifact_aliases": {
+    "note": "Artifacts that MTA's Quarkus 2-era advice names by their pre-3.9 id. The pinned BOM manages only the renamed id (Quarkus 3.9 migration guide, 'RESTEasy Reactive renamed to Quarkus REST'); the brief points the worker at the managed name so it never adds an unversioned, unmanaged dependency.",
+    "io.quarkus:quarkus-resteasy-reactive": "io.quarkus:quarkus-rest",
+    "io.quarkus:quarkus-resteasy-reactive-jackson": "io.quarkus:quarkus-rest-jackson",
+    "io.quarkus:quarkus-resteasy-reactive-jsonb": "io.quarkus:quarkus-rest-jsonb",
+    "io.quarkus:quarkus-resteasy-reactive-qute": "io.quarkus:quarkus-rest-qute",
+    "io.quarkus:quarkus-rest-client-reactive": "io.quarkus:quarkus-rest-client",
+    "io.quarkus:quarkus-rest-client-reactive-jackson": "io.quarkus:quarkus-rest-client-jackson",
+    "io.quarkus:quarkus-rest-client-reactive-jsonb": "io.quarkus:quarkus-rest-client-jsonb"
+  },
+  "package_renames": {
+    "note": "Jakarta EE 10 namespace (Quarkus 3 migration guide, 'Jakarta EE 10' section): javax.* → jakarta.* for these packages. The brief attaches the rename to a compiler diagnostic that names one of them; the worker changes the import, never the dependency. javax.servlet is deliberately absent: the selected stack (quarkus-rest) has no Servlet API, so jakarta.servlet does not compile either; Servlet handler parameters are handler_parameters.undocumented rows with their own actions and capability gaps (v26 t_4fd2dcec: the rename produced 'package jakarta.servlet.http does not exist').",
+    "javax.persistence": "jakarta.persistence",
+    "javax.validation": "jakarta.validation",
+    "javax.transaction": "jakarta.transaction",
+    "javax.inject": "jakarta.inject",
+    "javax.enterprise": "jakarta.enterprise",
+    "javax.annotation": "jakarta.annotation",
+    "javax.ws.rs": "jakarta.ws.rs",
+    "javax.json": "jakarta.json",
+    "javax.xml.bind": "jakarta.xml.bind"
+  },
+  "plugin_config": {
+    "note": "Documented configuration of build plugins that generate sources, applied by the bootstrap when the plugin is present. Each row: the version (a measured Maven Central release), configuration leaves set wherever they appear under the plugin, and configOptions entries. openapi-generator: the `spring` generator (library spring-boot) emits javax.validation and springfox annotations; the documented Quarkus target is generator `jaxrs-spec` with library `quarkus` and useJakartaEe (openapi-generator generator reference for jaxrs-spec).",
+    "org.openapitools:openapi-generator-maven-plugin": {
+      "version": "7.25.0",
+      "version_source": "https://repo1.maven.org/maven2/org/openapitools/openapi-generator-maven-plugin/maven-metadata.xml (2026-09-10)",
+      "configuration": {
+        "generatorName": "jaxrs-spec",
+        "library": "quarkus"
+      },
+      "configOptions": {
+        "useJakartaEe": "true",
+        "dateLibrary": "java8",
+        "useBeanValidation": "true",
+        "openApiNullable": "false",
+        "useMicroProfileOpenAPIAnnotations": "false",
+        "sourceFolder": "src/main/java"
+      },
+      "remove_configOptions": [
+        "java8",
+        "performBeanValidation"
+      ],
+      "docs": "https://openapi-generator.tech/docs/generators/jaxrs-spec",
+      "note_source_folder": "jaxrs-spec writes to <output>/src/gen/java by default while the plugin registers <output>/<configOptions.sourceFolder or src/main/java> as a compile source root (CodeGenMojo.getCompileSourceRoot, 7.25.0). Pinning sourceFolder makes the two agree and matches the source root the legacy build-helper already registers. Measured live 2026-09-10 on pilot v7: without it Maven failed at default-compile on missing DTOs while the generated files sat in src/gen/java."
+    },
+    "org.apache.maven.plugins:maven-compiler-plugin": {
+      "ensure_list": {
+        "compilerArgs": {
+          "arg": [
+            "-parameters"
+          ]
+        }
+      },
+      "source": "https://quarkus.io/guides/maven-tooling (MTA javaee-pom-to-quarkus-00030 matches compilerArgs/arg = -parameters)"
+    },
+    "org.jacoco:jacoco-maven-plugin": {
+      "version": "0.8.11",
+      "note": "JaCoCo before 0.8.11 cannot read Java 21 class files (major version 65) and fails the report goal with UnsupportedClassVersionError; 0.8.11 is the release that officially supports Java 21 (https://github.com/jacoco/jacoco/releases/tag/v0.8.11). The pinned structure_extractor toolchain is jdk-21, so a legacy pom carrying 0.8.7 breaks mvn package on the destination. Measured live 2026-09-10 on pilot v7: the loop never saw it because the measure stops at the test phase."
+    }
+  },
+  "remove_dependencies": {
+    "note": "Legacy dependencies with a documented replacement (or none) on this platform; the bootstrap removes them and adds the replacement extensions. Rows measured on pilot v6 (2026-09-10): the loop accepted each of these pom edits one card at a time.",
+    "io.springfox:springfox-boot-starter": {
+      "to": [
+        "quarkus-smallrye-openapi"
+      ],
+      "source": "https://quarkus.io/guides/openapi-swaggerui (springfox is Spring MVC only)"
+    },
+    "org.springframework.data:spring-data-jdbc-core": {
+      "to": [],
+      "source": "https://quarkus.io/guides/spring-data-jpa (Spring Data JDBC has no Quarkus compatibility extension; JDBC access on Quarkus is Agroal, quarkus-agroal comes with the JPA starter mapping)"
+    },
+    "org.springframework.security:spring-security-test": {
+      "to": [
+        "quarkus-test-security"
+      ],
+      "scope": "test",
+      "source": "https://quarkus.io/guides/security-testing"
+    }
+  },
+  "replace_dependencies": {
+    "note": "javax → jakarta artifact renames the BOM manages (MTA javax-to-jakarta-dependencies-00001/00003).",
+    "javax.xml.bind:jaxb-api": "jakarta.xml.bind:jakarta.xml.bind-api",
+    "javax.validation:validation-api": "jakarta.validation:jakarta.validation-api",
+    "javax.persistence:javax.persistence-api": "jakarta.persistence:jakarta.persistence-api",
+    "javax.annotation:javax.annotation-api": "jakarta.annotation:jakarta.annotation-api"
+  },
+  "plugins_to_add": {
+    "note": "Plugins the platform guide adds when absent (MTA javaee-pom-to-quarkus-00040; https://quarkus.io/guides/maven-tooling).",
+    "maven-failsafe-plugin": {
+      "artifactId": "maven-failsafe-plugin",
+      "version": "${surefire-plugin.version}",
+      "executions": {
+        "execution": {
+          "goals": {
+            "goal": [
+              "integration-test",
+              "verify"
+            ]
+          },
+          "configuration": {
+            "systemPropertyVariables": {
+              "native.image.path": "${project.build.directory}/${project.build.finalName}-runner",
+              "java.util.logging.manager": "org.jboss.logmanager.LogManager",
+              "maven.home": "${maven.home}"
+            }
+          }
+        }
+      }
+    },
+    "maven-surefire-plugin": {
+      "artifactId": "maven-surefire-plugin",
+      "version": "${surefire-plugin.version}",
+      "configuration": {
+        "systemPropertyVariables": {
+          "java.util.logging.manager": "org.jboss.logmanager.LogManager",
+          "maven.home": "${maven.home}"
+        }
+      }
+    }
+  },
+  "profile_files": {
+    "note": "Spring profile files application-<profile>.properties are merged into application.properties as %<profile>.<key> and removed (https://quarkus.io/guides/config-reference#profiles; MTA springboot-properties-to-quarkus-00001). Keys are mapped first (properties / property_prefixes)."
+  },
+  "test_scoped": {
+    "note": "Artifacts the mapping adds in test scope.",
+    "artifacts": [
+      "quarkus-junit5",
+      "rest-assured",
+      "quarkus-test-security",
+      "assertj-core"
+    ]
+  },
+  "datasources": {
+    "note": "The destination platform's documented JDBC extensions, one row per quarkus.datasource.db-kind (RHBQ 3.27 Configure data sources: https://docs.redhat.com/en/documentation/red_hat_build_of_quarkus/3.27/html/configure_data_sources/datasources). A db-kind with no row here is not configurable on this platform: hsqldb and derby-in-memory legacies therefore need an explicit engine decision (decisions.yaml datasource), never a silent driver swap.",
+    "db_kinds": {
+      "postgresql": {
+        "extension": "io.quarkus:quarkus-jdbc-postgresql",
+        "note": "RHBQ 3.27 Configure data sources, PostgreSQL: quarkus-jdbc-postgresql."
+      },
+      "mysql": {
+        "extension": "io.quarkus:quarkus-jdbc-mysql",
+        "note": "RHBQ 3.27 Configure data sources, MySQL: quarkus-jdbc-mysql."
+      },
+      "mariadb": {
+        "extension": "io.quarkus:quarkus-jdbc-mariadb",
+        "note": "RHBQ 3.27 Configure data sources, MariaDB: quarkus-jdbc-mariadb."
+      },
+      "mssql": {
+        "extension": "io.quarkus:quarkus-jdbc-mssql",
+        "note": "RHBQ 3.27 Configure data sources, Microsoft SQL Server: quarkus-jdbc-mssql."
+      },
+      "db2": {
+        "extension": "io.quarkus:quarkus-jdbc-db2",
+        "note": "RHBQ 3.27 Configure data sources, IBM Db2: quarkus-jdbc-db2."
+      },
+      "h2": {
+        "extension": "io.quarkus:quarkus-jdbc-h2",
+        "note": "RHBQ 3.27 Configure data sources, H2: quarkus-jdbc-h2. In-memory H2 is a development database, not a parity referent for a run that must prove persistence effects."
+      },
+      "derby": {
+        "extension": "io.quarkus:quarkus-jdbc-derby",
+        "note": "RHBQ 3.27 Configure data sources, Apache Derby: quarkus-jdbc-derby."
+      },
+      "oracle": {
+        "extension": "io.quarkus:quarkus-jdbc-oracle",
+        "note": "RHBQ 3.27 Configure data sources, Oracle: quarkus-jdbc-oracle."
+      }
+    },
+    "effective_keys": {
+      "note": "The unprefixed keys the destination must carry for the decided engine. A profile-prefixed key alone is not a configured datasource: Quarkus resolves db-kind at build time, and pilot v7 failed augmentation with 'Datasource <default> is not configured' while %hsqldb.* keys sat in application.properties.",
+      "quarkus.datasource.db-kind": "datasource.db_kind",
+      "quarkus.datasource.jdbc.url": "datasource.jdbc_url_env",
+      "quarkus.datasource.username": "datasource.username_env",
+      "quarkus.datasource.password": "datasource.password_env",
+      "quarkus.hibernate-orm.database.generation": "datasource.hibernate_generation"
+    }
+  },
+  "symbol_renames": {
+    "note": "Symbol-level targets a repair moves TO, one row per documented mapping and never an inference -- the same contract package_renames carries, at member/type granularity. Used by the unit former to seal target_symbols and by the checkpoint to decide whether a diagnostic that is still reported names a DOCUMENTED replacement. BOTH SIDES OF EVERY ROW ARE QUALIFIED IDENTITIES: the key is the fully-qualified symbol the repair leaves and `to` is the fully-qualified symbol it moves to, because a checkpoint resolves a diagnostic's token through the declaring file's imports and can only compare the result against a qualified name. jakarta.ws.rs.core.Context has a row and jakarta.ws.rs.Context does not, and an unbound `UriBuilder` -- a simple name nothing imports -- is not jakarta.ws.rs.core.UriBuilder however it is spelled; that is the whole reason these are written down rather than inferred. A row whose key or whose `to` is not qualified is dropped by the loader (worklist.symbol_renames) and documents nothing. `to` is the target, `kind` is what the symbol is, `source` is where the mapping is documented.",
+    "javax.ws.rs.core.Context": {
+      "to": "jakarta.ws.rs.core.Context",
+      "kind": "annotation",
+      "source": "https://quarkus.io/guides/migrate-to-quarkus-3 (Jakarta EE 10 namespace: javax.* -> jakarta.*)"
+    },
+    "javax.ws.rs.core.UriInfo": {
+      "to": "jakarta.ws.rs.core.UriInfo",
+      "kind": "type",
+      "source": "https://quarkus.io/guides/migrate-to-quarkus-3 (Jakarta EE 10 namespace: javax.* -> jakarta.*)"
+    },
+    "javax.ws.rs.core.UriBuilder": {
+      "to": "jakarta.ws.rs.core.UriBuilder",
+      "kind": "type",
+      "source": "https://quarkus.io/guides/migrate-to-quarkus-3 (Jakarta EE 10 namespace: javax.* -> jakarta.*)"
+    },
+    "javax.ws.rs.core.Response": {
+      "to": "jakarta.ws.rs.core.Response",
+      "kind": "type",
+      "source": "https://quarkus.io/guides/migrate-to-quarkus-3 (Jakarta EE 10 namespace: javax.* -> jakarta.*)"
+    },
+    "javax.ws.rs.core.MediaType": {
+      "to": "jakarta.ws.rs.core.MediaType",
+      "kind": "type",
+      "source": "https://quarkus.io/guides/migrate-to-quarkus-3 (Jakarta EE 10 namespace: javax.* -> jakarta.*)"
+    },
+    "javax.ws.rs.core.HttpHeaders": {
+      "to": "jakarta.ws.rs.core.HttpHeaders",
+      "kind": "type",
+      "source": "https://quarkus.io/guides/migrate-to-quarkus-3 (Jakarta EE 10 namespace: javax.* -> jakarta.*)"
+    },
+    "org.springframework.web.util.UriComponentsBuilder": {
+      "to": "jakarta.ws.rs.core.UriBuilder",
+      "kind": "type",
+      "source": "https://quarkus.io/version/3.27/guides/rest (Jakarta REST UriInfo/UriBuilder build a request-aware absolute URI; @Context injects them)",
+      "note": "the Spring Web compatibility extension does not supply UriComponentsBuilder; the platform's own request-aware builder is reached from an injected UriInfo (uriInfo.getBaseUriBuilder()), which is what keeps an absolute Location under the application base"
+    },
+    "org.springframework.web.util.UriComponents": {
+      "to": "jakarta.ws.rs.core.UriBuilder",
+      "kind": "type",
+      "source": "https://quarkus.io/version/3.27/guides/rest (Jakarta REST UriInfo/UriBuilder build a request-aware absolute URI; @Context injects them)"
+    }
+  },
+  "adapter_owned_annotations": {
+    "note": "Annotations whose BEHAVIOUR a registered harness response adapter reproduces (ADR-019), so on the destination the annotation itself has nothing left to do and the platform's compatibility API does not declare it. A row is the compile half of that ownership and only the compile half: the action retires the annotation and its import, and the behaviour stays with the adapter's parity obligation, which renders the permissions from the SOURCE policy (M1's structural model), never from destination code. So the compile retirement discharges no parity obligation, and removing the annotation from a controller is never evidence about CORS. KEYS ARE QUALIFIED IDENTITIES, like symbol_renames: a diagnostic resolved through the declaring file's imports to exactly this name gets the row, and another package's annotation spelled the same way gets nothing. `adapter` and `contract` name the registered adapter (response_adapters.contract(adapter)['contract']); a row whose contract is not the registered one is dropped by the loader (worklist.adapter_owned_annotations), as is an unqualified key. `policy_evidence` is where the adapter reads the source policy; `action` is the one first edit the planner renders for a unit or an item whose diagnostic names the row. There is no generic rule: an annotation without a row here is not retired by this block.",
+    "org.springframework.web.bind.annotation.CrossOrigin": {
+      "kind": "annotation",
+      "adapter": "cors",
+      "contract": "source-cors-response-adapter/v1",
+      "policy_evidence": "evidence/structure/structure.json (M1's structural model: every @CrossOrigin of the frozen source, the handlers it covers and the source's security configuration; response_adapters.cors_policy)",
+      "source": "https://quarkus.io/version/3.27/guides/http-reference#cors-filter (the platform's CORS filter is application-wide and answers a preflight before any endpoint; https://quarkus.io/version/3.27/guides/security-cors#cors-filter) and ADR-019 (the source-preserving CORS response adapter owns cross-origin behaviour)",
+      "note": "the Spring Web compatibility API does not ship CrossOrigin, so `cannot find symbol: class CrossOrigin` stays until the annotation is gone; the source policy it declared is preserved in M1's structural model and reproduced by the CORS adapter's parity card",
+      "action": "retire @CrossOrigin: delete each @CrossOrigin annotation in the file, class-level or method-level, together with its arguments, and delete its import (org.springframework.web.bind.annotation.CrossOrigin). Change nothing else: every controller method, route and other annotation stays as it is. Nothing replaces it here -- no other annotation, no filter, no quarkus.http.cors.* configuration: the source policy is preserved in M1's structural model and the CORS response adapter reproduces it on its own parity card (ADR-019)."
+    }
+  },
+  "handler_parameters": {
+    "note": "Controller-method PARAMETER kinds the Spring Web compatibility extension documents (H6b). The guide's 'Supported Spring Web functionalities' lists the annotations a parameter may carry and, beyond those, only jakarta.servlet.http.HttpServletRequest and HttpServletResponse as parameter types; a parameter of any other kind is not among the documented ones. A 4xx the destination answers with an empty body where the source accepted the same request is the shape of a request refused before or at the handler boundary, and the planner (worklist.request_rejection_advice) resolves THIS handler's signature through the structure model against these rows. `undocumented` holds the kinds a Spring handler commonly declares that the list does not name; each row cites where its replacement is documented. Rows are documentation, never an inference about what the compat layer does with such a parameter -- the loop finds that. Each `undocumented` row carries an `action`: the one concrete first edit for a handler that declares that kind, phrased from the documentation the row cites and from nothing specific to any specimen; the planner renders it as the item's first action. When a unit seals such a kind and the compiler model shows it as the type of an HTTP handler parameter, the row's action is the unit's FIRST target, naming those handlers, ahead of any symbol_renames target for the same symbol; the rename then covers only the other uses (a helper's builder, a local) and names the handlers it is not for (V16-5: the bare rename left an unannotated UriBuilder the platform refused as a second request body).",
+    "source": "https://quarkus.io/version/3.27/guides/spring-web#supported-spring-web-functionalities",
+    "supported_annotations": [
+      "org.springframework.web.bind.annotation.RequestParam",
+      "org.springframework.web.bind.annotation.RequestHeader",
+      "org.springframework.web.bind.annotation.MatrixVariable",
+      "org.springframework.web.bind.annotation.PathVariable",
+      "org.springframework.web.bind.annotation.CookieValue",
+      "org.springframework.web.bind.annotation.RequestBody"
+    ],
+    "supported_types": [],
+    "undocumented": {
+      "org.springframework.validation.BindingResult": {
+        "kind": "type",
+        "source": "https://quarkus.io/version/3.27/guides/spring-web#supported-spring-web-functionalities",
+        "note": "not among the parameter kinds the Spring Web guide lists. On the destination a constraint violation on a validated parameter is a jakarta.validation.ConstraintViolationException answered by the platform's built-in ExceptionMapper as 400 with a JSON violation report (https://quarkus.io/version/3.27/guides/validation#rest-end-point-validation); a handler that inspects the BindingResult to build its own error body does that through the platform's mechanism instead (references/rest-annotations.md rest-valid, references/exception-mapping.md exc-validation).",
+        "action": "the compat layer does not bind a BindingResult: remove it from the parameter list and validate INSIDE the handler with an injected jakarta.validation.Validator (@Inject Validator validator). Translate every bindingResult.hasErrors() to !validator.validate(<body>).isEmpty() and every !bindingResult.hasErrors() to validator.validate(<body>).isEmpty(), keeping the rest of the guard exactly as the source wrote it (`bindingResult.hasErrors() || dto.getId() != null` becomes `!validator.validate(dto).isEmpty() || dto.getId() != null`: never inverted, never || turned into &&). Since the handler now validates before it mutates anything, remove @Valid from the body parameter (a @Valid body is rejected by the platform's built-in mapper with a 400 JSON report before the handler runs); keep the DTO's own constraints and nested @Valid. Build the source's response (status, headers, body as the scenario's expected response records them) from the returned Set<ConstraintViolation<T>> (each violation's getPropertyPath() and getMessage() are the field and message Spring's FieldError carried). BindingResult must not remain a parameter (references/rest-annotations.md rest-valid, references/exception-mapping.md exc-validation).",
+        "translation": {
+          "rule": "a conditional translation, applied at every place the handler asks the Errors/BindingResult (V16-8): the call is replaced, the boolean expression around it is not",
+          "from": "<bindingResult>.hasErrors()",
+          "to": "!validator.validate(<the validated body>).isEmpty()",
+          "negated": {
+            "from": "!<bindingResult>.hasErrors()",
+            "to": "validator.validate(<the validated body>).isEmpty()"
+          },
+          "preserve": "every other operand, operator and their order exactly as the source wrote them: `bindingResult.hasErrors() || dto.getId() != null` becomes `!validator.validate(dto).isEmpty() || dto.getId() != null`, never `validator.validate(dto).isEmpty() || ...` (inverted) and never `... && ...` (a different guard); a local (`var violations = validator.validate(dto)`) is the same call",
+          "handler_owned_validation": "the handler validates before it mutates anything, so the platform must not validate first: remove @Valid from the body parameter (the jakarta.validation.Valid row's action); the DTO's own constraints and nested @Valid on its properties stay as they are",
+          "checked_by": "worklist._assess_handler_parameters: the handler's validation guards (DestModel validation_guards) against the frozen source handler's, and @Valid on a parameter of a handler that validates itself",
+          "source": "https://jakarta.ee/specifications/bean-validation/3.0/apidocs/jakarta/validation/validator#validate(T,java.lang.Class...) (validate returns the violations; an empty set means valid) and https://docs.spring.io/spring-framework/docs/5.3.x/javadoc-api/org/springframework/validation/Errors.html#hasErrors-- (true when there are errors)"
+        }
+      },
+      "org.springframework.validation.Errors": {
+        "kind": "type",
+        "source": "https://quarkus.io/version/3.27/guides/spring-web#supported-spring-web-functionalities",
+        "note": "the supertype of BindingResult: the same row (https://quarkus.io/version/3.27/guides/validation#rest-end-point-validation).",
+        "action": "the same first action as BindingResult: remove the parameter, validate inside the handler with an injected jakarta.validation.Validator, translate errors.hasErrors() to !validator.validate(<body>).isEmpty() keeping the rest of the guard verbatim (never inverted, never || turned into &&), remove @Valid from the body parameter, build the source's response from the violations.",
+        "translation": {
+          "rule": "a conditional translation, applied at every place the handler asks the Errors/BindingResult (V16-8): the call is replaced, the boolean expression around it is not",
+          "from": "<bindingResult>.hasErrors()",
+          "to": "!validator.validate(<the validated body>).isEmpty()",
+          "negated": {
+            "from": "!<bindingResult>.hasErrors()",
+            "to": "validator.validate(<the validated body>).isEmpty()"
+          },
+          "preserve": "every other operand, operator and their order exactly as the source wrote them: `bindingResult.hasErrors() || dto.getId() != null` becomes `!validator.validate(dto).isEmpty() || dto.getId() != null`, never `validator.validate(dto).isEmpty() || ...` (inverted) and never `... && ...` (a different guard); a local (`var violations = validator.validate(dto)`) is the same call",
+          "handler_owned_validation": "the handler validates before it mutates anything, so the platform must not validate first: remove @Valid from the body parameter (the jakarta.validation.Valid row's action); the DTO's own constraints and nested @Valid on its properties stay as they are",
+          "checked_by": "worklist._assess_handler_parameters: the handler's validation guards (DestModel validation_guards) against the frozen source handler's, and @Valid on a parameter of a handler that validates itself",
+          "source": "https://jakarta.ee/specifications/bean-validation/3.0/apidocs/jakarta/validation/validator#validate(T,java.lang.Class...) (validate returns the violations; an empty set means valid) and https://docs.spring.io/spring-framework/docs/5.3.x/javadoc-api/org/springframework/validation/Errors.html#hasErrors-- (true when there are errors)"
+        }
+      },
+      "org.springframework.web.util.UriComponentsBuilder": {
+        "kind": "type",
+        "source": "https://quarkus.io/version/3.27/guides/spring-web#supported-spring-web-functionalities",
+        "note": "not among the parameter kinds the Spring Web guide lists; symbol_renames maps it to jakarta.ws.rs.core.UriBuilder reached from an injected jakarta.ws.rs.core.UriInfo (uriInfo.getBaseUriBuilder(), references/rest-annotations.md rest-location-uri).",
+        "action": "the compat layer does not bind a UriComponentsBuilder: replace the parameter with @Context jakarta.ws.rs.core.UriInfo uriInfo and build the Location as uriInfo.getBaseUriBuilder().path(<the source's own path template>).build(<the source's own expansion arguments>) -- never new URI(String) (its checked URISyntaxException is vetoed) and never URI.create of a relative path (it drops the base the scenario compares). Pass each argument null-tolerantly, exactly as the source expanded it: Spring's buildAndExpand(x) expands a null x as an EMPTY segment, JAX-RS build(x) throws IllegalArgumentException for it (a 500 after the row is committed), so write build(x == null ? \"\" : x) or build(java.util.Objects.toString(x, \"\")) -- never String.valueOf(x) (it expands \"null\") and never a different value such as the saved entity's id instead of the source's own expression unless decisions.yaml location_arguments authorizes that substitution (references/rest-annotations.md rest-location-uri).",
+        "location_translation": {
+          "rule": "V17-5: the URI template expansion is translated argument by argument; the Location the source built, a null argument included, is the Location the destination builds",
+          "from": "<builder>.path(<template>).buildAndExpand(<arg>...)",
+          "to": "uriInfo.getBaseUriBuilder().path(<template>).build(<arg> == null ? \"\" : <arg>, ...)",
+          "null_argument": "Spring UriComponentsBuilder.buildAndExpand expands a null value as an empty segment (201 with /api/x/); JAX-RS UriBuilder.build(Object...) throws IllegalArgumentException for a null value, so every argument the source did not pass as a non-null literal is passed null-tolerantly: `a == null ? \"\" : a`, `a != null ? a : \"\"`, `Objects.toString(a, \"\")` or `Objects.requireNonNullElse(a, \"\")`; String.valueOf(a) is NOT null-tolerant (it expands \"null\")",
+          "substitution": "the argument stays the source's own expression (the same parameter, or a local of the same type, and the same accessors); another value -- typically the saved entity's id where the source expanded the request DTO's -- is a behaviour change unless decisions.yaml location_arguments.substitutions records it with an accepted ADR",
+          "checked_by": "worklist._location_verdict: the candidate handler's JAX-RS expansions (DestModel uri_expansions) against the frozen source handler's buildAndExpand arguments",
+          "source": "https://docs.spring.io/spring-framework/docs/5.3.x/javadoc-api/org/springframework/web/util/UriComponentsBuilder.html#buildAndExpand-java.lang.Object...- (expand; UriComponents.expand encodes a null value as an empty string) and https://jakarta.ee/specifications/restful-ws/3.1/apidocs/jakarta.ws.rs/jakarta/ws/rs/core/uribuilder#build(java.lang.Object...) (IllegalArgumentException if any of the values is null)",
+          "evidence": "v17 PetTypeRestController.addPetType: buildAndExpand(petType.getId()) on the request DTO answered 201 on the source; the migrated build(petType.getId()) threw IllegalArgumentException (Template parameter null: id) and answered 500 after the row was committed (tmp/v17-run-20260926/blockers.md V17-5)"
+        }
+      },
+      "jakarta.validation.Valid": {
+        "kind": "annotation",
+        "source": "https://quarkus.io/version/3.27/guides/validation#rest-end-point-validation",
+        "note": "not in the Spring Web guide's annotation table. Quarkus's validation guide documents @Valid on a REST endpoint parameter (quarkus-hibernate-validator, the extension spring-boot-starter-validation maps to): a violation is answered 400 with a JSON violation report by a built-in jakarta.ws.rs.ext.ExceptionMapper.",
+        "action": "the platform validates a @Valid endpoint parameter BEFORE the handler runs and answers a violation itself (400, JSON violation report, built-in ExceptionMapper). Keep @Valid only when the source's response to an invalid body IS that report. When the source answers an invalid body with its own status, headers or body (the scenario's expected response records them), remove @Valid from the parameter, inject jakarta.validation.Validator (@Inject Validator validator), call validator.validate(body) in the method, and build the source's response from the Set<ConstraintViolation<T>> it returns (references/rest-annotations.md rest-valid, references/exception-mapping.md exc-validation)."
+      },
+      "javax.validation.Valid": {
+        "kind": "annotation",
+        "source": "https://quarkus.io/version/3.27/guides/validation#rest-end-point-validation",
+        "note": "the pre-Jakarta spelling of jakarta.validation.Valid (package_renames javax.validation -> jakarta.validation); the same row.",
+        "action": "rename the import to jakarta.validation.Valid (package_renames), then the same first action as jakarta.validation.Valid."
+      },
+      "jakarta.servlet.http.HttpServletResponse": {
+        "kind": "type",
+        "source": "https://quarkus.io/version/3.27/guides/spring-web#supported-spring-web-functionalities",
+        "note": "not available on the selected stack: the guide supports HttpServletResponse only on the Classic RESTEasy stack with quarkus-undertow, and states that the Servlet API is not supported on Quarkus REST (quarkus-rest), which this catalog selects. org.springframework.http.ResponseEntity is a documented return type.",
+        "action": "the compat layer on Quarkus REST has no Servlet API, and a jakarta.servlet import does not compile there (package jakarta.servlet.http does not exist): remove the HttpServletResponse parameter. The qualified shape (migration_recipes servlet-redirect-response) is a handler whose only use of the response is response.sendRedirect(<target>): the Servlet container answers 302 Found with an ABSOLUTE Location built from the request's scheme, host and port. Change the return type from void to org.springframework.http.ResponseEntity<Void>, add the handler parameter @Context jakarta.ws.rs.core.UriInfo uriInfo, and return ResponseEntity.status(HttpStatus.FOUND).location(<location>).build() (org.springframework.http.HttpStatus), where <location> is uriInfo.getBaseUriBuilder().path(\"<the target's path after the application context path, without its leading slash>\").build() when the target is the application's context path followed by a path -- the base already carries quarkus.http.root-path, the destination key of server.servlet.context-path, so the context path appears once -- and java.net.URI.create(<target>) only when the target is already an absolute URL (scheme://host/...). A field or expression that existed only to hold the Servlet context path (for example @Value(\"#{servletContext.contextPath}\") or request.getContextPath()) has no Servlet context to read on the destination: remove it together with the parameter. Never URI.create of a relative path (it answers a relative Location where the source answered an absolute one), never a jakarta.servlet import, never quarkus-undertow, RESTEasy Classic or a Servlet dependency, and no io.quarkus or io.vertx type. Any other use of the response (getWriter, getOutputStream, setStatus, setHeader, addCookie, ...) or any other target form (a path outside the application, a path relative to the request) is not qualified: it is capability gap servlet-response-member -- stop and block the card naming that gap and the call; do not guess a translation.",
+        "capability_gap": "servlet-response-member",
+        "response_translation": {
+          "returns": "org.springframework.http.ResponseEntity",
+          "calls": [
+            "location"
+          ],
+          "why": "the source handler answered through the response it was given (sendRedirect: 302 and a Location); a translation that drops the parameter and returns void answers 200 with nothing, which compiles and loses the redirect (v26 worker exercise, corrected-brief sample 1)",
+          "forbidden_field_injection": {
+            "annotation": "org.springframework.beans.factory.annotation.Value",
+            "value_prefixes": [
+              "#{servletContext"
+            ],
+            "why": "a field of the handler's type that injected the Servlet context through SpEL (@Value(\"#{servletContext.contextPath}\")) has no Servlet context on the destination and SpEL is unsupported there (the package gate fails with 'SpEL expressions are not supported'); the base URI already carries the root path, so the field goes with the parameter (v28 t_25819d9c kept it). Only an injection through Spring @Value counts: the same text in another annotation is data"
+          }
+        }
+      },
+      "jakarta.servlet.http.HttpServletRequest": {
+        "kind": "type",
+        "source": "https://quarkus.io/version/3.27/guides/spring-web#supported-spring-web-functionalities",
+        "note": "not available on the selected stack: the guide supports HttpServletRequest only on the Classic RESTEasy stack with quarkus-undertow, and states that the Servlet API is not supported on Quarkus REST (quarkus-rest), which this catalog selects.",
+        "action": "the compat layer on Quarkus REST has no Servlet API, and a jakarta.servlet import does not compile there: no translation of an HttpServletRequest parameter is qualified on this stack (no recipe; the requirement stays unresolved as capability gap servlet-request). The documented replacements for a single value are annotations -- request.getHeader(\"n\") a @RequestHeader(\"n\") parameter, request.getParameter(\"n\") a @RequestParam(\"n\") parameter, a cookie a @CookieValue parameter, a path segment a @PathVariable parameter, each keeping the value's name, type, required-ness and default -- and request.getContextPath() the base of an injected @Context jakarta.ws.rs.core.UriInfo (uriInfo.getBaseUri()). Anything these cannot express (the session, the input stream, attributes, the remote address) is capability gap servlet-request: stop and block the card naming that gap and the call; never a jakarta.servlet import, never quarkus-undertow.",
+        "capability_gap": "servlet-request"
+      },
+      "javax.servlet.http.HttpServletResponse": {
+        "kind": "type",
+        "source": "https://quarkus.io/version/3.27/guides/spring-web#supported-spring-web-functionalities",
+        "note": "the pre-Jakarta spelling of jakarta.servlet.http.HttpServletResponse; the same row (no javax.servlet rename exists on the selected stack).",
+        "action": "the pre-Jakarta spelling: do not rename the import to jakarta.servlet (package_renames carries no javax.servlet row: the Servlet API is absent on this stack); the compat layer on Quarkus REST has no Servlet API, and a jakarta.servlet import does not compile there (package jakarta.servlet.http does not exist): remove the HttpServletResponse parameter. The qualified shape (migration_recipes servlet-redirect-response) is a handler whose only use of the response is response.sendRedirect(<target>): the Servlet container answers 302 Found with an ABSOLUTE Location built from the request's scheme, host and port. Change the return type from void to org.springframework.http.ResponseEntity<Void>, add the handler parameter @Context jakarta.ws.rs.core.UriInfo uriInfo, and return ResponseEntity.status(HttpStatus.FOUND).location(<location>).build() (org.springframework.http.HttpStatus), where <location> is uriInfo.getBaseUriBuilder().path(\"<the target's path after the application context path, without its leading slash>\").build() when the target is the application's context path followed by a path -- the base already carries quarkus.http.root-path, the destination key of server.servlet.context-path, so the context path appears once -- and java.net.URI.create(<target>) only when the target is already an absolute URL (scheme://host/...). A field or expression that existed only to hold the Servlet context path (for example @Value(\"#{servletContext.contextPath}\") or request.getContextPath()) has no Servlet context to read on the destination: remove it together with the parameter. Never URI.create of a relative path (it answers a relative Location where the source answered an absolute one), never a jakarta.servlet import, never quarkus-undertow, RESTEasy Classic or a Servlet dependency, and no io.quarkus or io.vertx type. Any other use of the response (getWriter, getOutputStream, setStatus, setHeader, addCookie, ...) or any other target form (a path outside the application, a path relative to the request) is not qualified: it is capability gap servlet-response-member -- stop and block the card naming that gap and the call; do not guess a translation.",
+        "capability_gap": "servlet-response-member",
+        "response_translation": {
+          "returns": "org.springframework.http.ResponseEntity",
+          "calls": [
+            "location"
+          ],
+          "why": "the source handler answered through the response it was given (sendRedirect: 302 and a Location); a translation that drops the parameter and returns void answers 200 with nothing, which compiles and loses the redirect (v26 worker exercise, corrected-brief sample 1)",
+          "forbidden_field_injection": {
+            "annotation": "org.springframework.beans.factory.annotation.Value",
+            "value_prefixes": [
+              "#{servletContext"
+            ],
+            "why": "a field of the handler's type that injected the Servlet context through SpEL (@Value(\"#{servletContext.contextPath}\")) has no Servlet context on the destination and SpEL is unsupported there (the package gate fails with 'SpEL expressions are not supported'); the base URI already carries the root path, so the field goes with the parameter (v28 t_25819d9c kept it). Only an injection through Spring @Value counts: the same text in another annotation is data"
+          }
+        }
+      },
+      "javax.servlet.http.HttpServletRequest": {
+        "kind": "type",
+        "source": "https://quarkus.io/version/3.27/guides/spring-web#supported-spring-web-functionalities",
+        "note": "the pre-Jakarta spelling of jakarta.servlet.http.HttpServletRequest; the same row (no javax.servlet rename exists on the selected stack).",
+        "action": "the pre-Jakarta spelling: do not rename the import to jakarta.servlet (package_renames carries no javax.servlet row: the Servlet API is absent on this stack); the compat layer on Quarkus REST has no Servlet API, and a jakarta.servlet import does not compile there: no translation of an HttpServletRequest parameter is qualified on this stack (no recipe; the requirement stays unresolved as capability gap servlet-request). The documented replacements for a single value are annotations -- request.getHeader(\"n\") a @RequestHeader(\"n\") parameter, request.getParameter(\"n\") a @RequestParam(\"n\") parameter, a cookie a @CookieValue parameter, a path segment a @PathVariable parameter, each keeping the value's name, type, required-ness and default -- and request.getContextPath() the base of an injected @Context jakarta.ws.rs.core.UriInfo (uriInfo.getBaseUri()). Anything these cannot express (the session, the input stream, attributes, the remote address) is capability gap servlet-request: stop and block the card naming that gap and the call; never a jakarta.servlet import, never quarkus-undertow.",
+        "capability_gap": "servlet-request"
+      }
+    },
+    "servlet_types_condition": "The guide supports jakarta.servlet.http.HttpServletRequest and HttpServletResponse parameters ONLY on the Classic RESTEasy stack with quarkus-undertow: 'If your application uses the Reactive stack (quarkus-rest / quarkus-rest-jackson), then the Servlet API is not supported.' This catalog's always_add selects quarkus-rest, so both are undocumented rows here, each with its action (v26 t_4fd2dcec cycled catalog greps for a Servlet rule that this block listed as supported)."
+  },
+  "application_paths": {
+    "note": "Where the source serves its application and management endpoints, and the destination key that owes the same value (round 3). planner.source_requirements.application_paths reads the FROZEN source's configuration (application.properties and the application-<profile>.properties of the profiles the source itself activates) and owes each configured key's effective value on the destination key -- or the value decisions.yaml application_paths records under an accepted ADR; requirement_checks measures it as config:application-path. A source that configures none of these keeps both platforms' defaults.",
+    "server.servlet.context-path": {
+      "dest": "quarkus.http.root-path",
+      "source": "https://docs.spring.io/spring-boot/appendix/application-properties/index.html#application-properties.server.server.servlet.context-path; https://quarkus.io/guides/all-config#quarkus-vertx-http_quarkus-http-root-path"
+    },
+    "spring.mvc.servlet.path": {
+      "dest": "quarkus.rest.path",
+      "source": "https://docs.spring.io/spring-boot/appendix/application-properties/index.html#application-properties.web.spring.mvc.servlet.path; https://quarkus.io/guides/rest#reference (quarkus.rest.path: the path prefix of the REST resources)"
+    },
+    "management.endpoints.web.base-path": {
+      "dest": "quarkus.http.non-application-root-path",
+      "source": "https://docs.spring.io/spring-boot/appendix/application-properties/index.html#application-properties.actuator.management.endpoints.web.base-path; https://quarkus.io/guides/all-config#quarkus-vertx-http_quarkus-http-non-application-root-path"
+    }
+  },
+  "repository_behaviour": {
+    "note": "Where the behaviour of an owed fragment method COMES FROM in the source (V17-3). A <Fragment>Impl owed under spring-data-fragment-impl/v1 must carry the SELECTED source behaviour of each member: the Spring Data repository the decided build profiles select (decisions.build_profiles.active; a type gated by @Profile to another profile is never the behaviour source, even when its text implements the same interface), and within it, in Spring Data's own precedence, (1) a custom implementation fragment the repository also extends (its <Override>Impl method), (2) a @Query the repository declares for the member, (3) the CRUD method of the repository base implementation the member's name and arity select, (4) a query derived from the method name. Anything else is unresolved, never guessed. planner.source_requirements.repository_behaviour reads this block and the frozen structural model; nothing here names a specimen.",
+    "source": "https://docs.spring.io/spring-data/jpa/reference/repositories/custom-implementations.html (fragments take precedence over the base repository and query derivation); https://docs.spring.io/spring-data/jpa/reference/jpa/query-methods.html (@Query, derived queries); https://docs.spring.io/spring-data/jpa/reference/repositories/core-concepts.html (CrudRepository methods served by SimpleJpaRepository)",
+    "query_annotations": [
+      "org.springframework.data.jpa.repository.Query"
+    ],
+    "modifying_annotations": [
+      "org.springframework.data.jpa.repository.Modifying"
+    ],
+    "write_calls": {
+      "note": "a source override is a WRITE when its recorded calls change persistent state through the JPA API (the effect is then proven by a committed read-back, not by a read)",
+      "owners": [
+        "javax.persistence.EntityManager",
+        "jakarta.persistence.EntityManager",
+        "javax.persistence.Query",
+        "jakarta.persistence.Query",
+        "javax.persistence.TypedQuery",
+        "jakarta.persistence.TypedQuery"
+      ],
+      "names": [
+        "persist",
+        "merge",
+        "remove",
+        "executeUpdate"
+      ]
+    },
+    "crud_defaults": {
+      "save/1": {
+        "kind": "write",
+        "semantics": "SimpleJpaRepository.save: persist a NEW entity (null id / version), merge an existing one, inside a read-write transaction; the change is committed when the transaction ends, so a later request reads it. A non-null id whose row does not exist is merged, and the SOURCE's provider (Hibernate 5) INSERTED a new row with a newly generated id for it; the destination's (Hibernate 6.6+) merge throws OptimisticLockException instead. Port the source's effect: when the id is set but no row exists, persist it as new (the identifier generated, never the requested one); merge only a row that exists",
+        "source": "https://docs.hibernate.org/orm/6.6/migration-guide/migration-guide.html#merge-versioned-deleted (\"Previously, merging a detached entity resulted in a SQL insert whenever there was no matching row in the database ... An OptimisticLockException is now thrown\"); https://docs.spring.io/spring-data/jpa/reference/jpa/entity-persistence.html (a null id or null non-primitive version is new and persisted, anything else is merged)",
+        "evidence": "v31 (spring-petclinic-rest-legacy-v31, 2026-10-02): every captured create whose request carries an id answered 500 (StaleObjectStateException from <X>RepositoryImpl.save, 'id == null ? persist : merge') where the source answered 201 with a newly generated id",
+        "checked_by": [
+          "skills/migration/fix-until-green/scripts/merge-without-row-runtime.test.py (pinned platform, PostgreSQL 16: the literal merge answers 500 with OptimisticLockException/StaleObjectStateException and stores nothing; the port answers 201 with a generated id read back by a later request)",
+          "M4 parity over the create scenarios"
+        ]
+      },
+      "saveAll/1": {
+        "kind": "write",
+        "semantics": "SimpleJpaRepository.saveAll: save each element as save/1 does (including its id-without-row case), in one transaction"
+      },
+      "delete/1": {
+        "kind": "write",
+        "semantics": "SimpleJpaRepository.delete: remove the entity (merged first when detached; a detached entity that no longer exists is ignored) inside a read-write transaction; the removal is committed, cascades as the mapping declares"
+      },
+      "deleteById/1": {
+        "kind": "write",
+        "semantics": "SimpleJpaRepository.deleteById: find by id and delete/1 it; a missing id is ignored (Spring Data 3) or raises EmptyResultDataAccessException (Spring Data 2) -- the source's own version decides"
+      },
+      "deleteAll/0": {
+        "kind": "write",
+        "semantics": "SimpleJpaRepository.deleteAll: delete/1 every entity, in one transaction"
+      },
+      "findAll/0": {
+        "kind": "read",
+        "semantics": "SimpleJpaRepository.findAll: every entity of the domain type, read-only transaction"
+      },
+      "findById/1": {
+        "kind": "read",
+        "semantics": "SimpleJpaRepository.findById: the entity with that id; the declared return type decides Optional vs nullable"
+      },
+      "findAllById/1": {
+        "kind": "read",
+        "semantics": "SimpleJpaRepository.findAllById: the entities with those ids"
+      },
+      "existsById/1": {
+        "kind": "read",
+        "semantics": "SimpleJpaRepository.existsById"
+      },
+      "count/0": {
+        "kind": "read",
+        "semantics": "SimpleJpaRepository.count"
+      }
+    },
+    "derived_query_prefixes": [
+      "find",
+      "read",
+      "get",
+      "query",
+      "search",
+      "stream",
+      "count",
+      "exists",
+      "delete",
+      "remove"
+    ],
+    "query_result_semantics": {
+      "single_entity": "Spring Data JPA returns null when a query method declared with a single entity (not Optional, not a collection) finds no row -- a @Query, a derived query or findById on the repository -- and raises IncorrectResultSizeDataAccessException for more than one. JPA's TypedQuery.getSingleResult() throws NoResultException for no row, which answers 500 where the source answered its own null path (typically 404). Port the member as query.getResultStream().findFirst().orElse(null) when the source guarantees at most one row (an id or unique key), or catch NoResultException and return null; never getSingleResult() bare, and never turn the source's null into an exception or an empty object",
+      "optional": "an Optional return is Optional.empty() for no row (getResultStream().findFirst())",
+      "collection": "a collection return is an empty collection for no row (getResultList())",
+      "source": "https://docs.spring.io/spring-data/jpa/reference/repositories/null-handling.html (repository query methods return null for an absent single result); https://jakarta.ee/specifications/persistence/3.1/apidocs/jakarta.persistence/jakarta/persistence/typedquery#getSingleResult() (NoResultException if there is no result)",
+      "evidence": "M-3 reference qualification 2026-09-30 (wp/m3-qualification, reference-owner-path-runtime): owner-get-missing, owner-update-missing, owner-delete-missing and the delete read-backs answered 500 on the v28 candidate (NoResultException from OwnerRepositoryImpl.findById) where the source answered 404",
+      "checked_by": [
+        "skills/migration/fix-until-green/scripts/single-result-null-runtime.test.py (the bare getSingleResult 500 and the translation's 404 on the pinned platform)",
+        "M4 parity over the corpus scenarios that read a missing row"
+      ]
+    }
+  },
+  "persistence_behaviour_translations": {
+    "note": "Behaviour a LITERAL port of source persistence code does not preserve on the destination's persistence provider (V17-3). Each row is matched against the ORDERED calls the frozen structural model records for the selected source method (owner type and method name, pre-order); a match adds an obligation to that owed member: port the BEHAVIOUR (the committed effects the source produced), not the text. Evidence is cited per row. A row's `when` may name `then_any` (a later call must follow the first) and `unless_any` (no call of the method may match: a merge that only re-attaches before a remove is not a save).",
+    "hibernate6-flush-before-query": {
+      "when": {
+        "first": {
+          "owners": [
+            "javax.persistence.EntityManager",
+            "jakarta.persistence.EntityManager"
+          ],
+          "names": [
+            "remove"
+          ]
+        },
+        "then_any": {
+          "owners": [
+            "javax.persistence.Query",
+            "jakarta.persistence.Query",
+            "javax.persistence.TypedQuery",
+            "jakarta.persistence.TypedQuery",
+            "javax.persistence.EntityManager",
+            "jakarta.persistence.EntityManager"
+          ],
+          "names": [
+            "executeUpdate",
+            "getResultList",
+            "getSingleResult",
+            "getResultStream",
+            "createNativeQuery"
+          ]
+        }
+      },
+      "obligation": "the source removes the entity and THEN queries or bulk-deletes its dependents. Hibernate 6 (the destination's ORM) flushes the pending removal before an AUTO-flush query or a native/bulk statement runs, as the source's provider did for the captured scenarios. Port the COMMITTED EFFECTS THE SOURCE PRODUCED, scenario by scenario, never a reordering that changes them: where the source's delete SUCCEEDED (the row and its dependents gone), the destination's must too; where the source REFUSED it (a row still referenced: the constraint violation the flushed removal raised answered an error and the row stayed), the destination must refuse it the same way and keep the row -- never delete or detach the dependents first to make a refused delete succeed. Reorder only where the literal order fails on the destination (TransientPropertyValueException) for a delete the source completed; the check is the committed state the source recorded for each of its scenarios (the delete and the refused-delete scenarios alike). A REORDERING IS NOT ENOUGH WHERE THE SOURCE LOADS THE DEPENDENTS: a bulk JPQL/native delete bypasses the persistence context, so dependents a query loaded (and the owners they were loaded with) stay managed; at flush Hibernate 6 cascades a managed owner's collection (cascade ALL/PERSIST) back to the deleted dependent and refuses the parent's removal with TransientPropertyValueException. Port such a completed delete as bulk statements over the dependents and then the parent, with no dependent loaded as an entity in that transaction -- or, where entities must be removed, remove each and unlink it from every managed owning collection first",
+      "evidence": "v17 (spring-petclinic-rest-legacy-v17, 2026-09-26): the literal port of the PetType and Specialty override deletes failed with TransientPropertyValueException / FK vet_specialties for deletes the source completed; reordering dependents-first matched those captured effects (204, row and dependents gone). v31 (2026-10-02): the same reordering made sc:delete-referenced-specialties-1 succeed (204, row gone) where the source REFUSED it (400, row kept) -- the reordering is bounded by the source's recorded refusals; v31 lab (2026-10-02, v31 candidate + harness 4448cb17..fab613d1, PostgreSQL 16): the PetType delete the source completed (204) failed 400 on the destination in BOTH orders -- literal and dependents-first -- with TransientPropertyValueException (pets loaded by the SELECT, their owners eager with cascade ALL), and with each pet removed as an entity; bulk statements only (visits by subquery, pets, then the type) answered 204 with the type and its pets gone",
+      "source": "https://docs.jboss.org/hibernate/orm/6.2/userguide/html_single/Hibernate_User_Guide.html#flushing-auto (AUTO flush before a query that may be affected; before any native query)",
+      "checked_by": [
+        "skills/migration/fix-until-green/scripts/referenced-delete-runtime.test.py (pinned platform, PostgreSQL 16: the literal order refuses a referenced delete -- FK, rows kept -- and completes an unreferenced one; dependents-first makes the referenced delete succeed, the v31 regression; a referenced delete that SELECT-loads its dependents before bulk-deleting them is refused in both orders -- TransientPropertyValueException, the eager owner's cascade re-persists the bulk-deleted child, rows kept -- while bulk statements only, no entity loading, complete it (204, rows gone), the v31 lab finding)",
+        "behavior:repository-effects and M4 parity over the delete and delete-referenced scenarios"
+      ]
+    },
+    "hibernate66-merge-detached-without-row": {
+      "when": {
+        "first": {
+          "owners": [
+            "javax.persistence.EntityManager",
+            "jakarta.persistence.EntityManager"
+          ],
+          "names": [
+            "merge"
+          ]
+        },
+        "unless_any": {
+          "owners": [
+            "javax.persistence.EntityManager",
+            "jakarta.persistence.EntityManager"
+          ],
+          "names": [
+            "remove"
+          ]
+        }
+      },
+      "obligation": "the source merges an entity it did not load (a request's id). On the source's provider (Hibernate 5) a merge whose row does not exist INSERTED a new row with a newly generated id; on the destination's (Hibernate 6.6+) it throws OptimisticLockException (StaleObjectStateException), answered 500. Port the effect: when the id is set but no row exists, persist the entity as new (the identifier generated); merge only a row that exists. The check is the committed state and the status the source recorded for its create and update scenarios",
+      "evidence": "v31 (spring-petclinic-rest-legacy-v31, 2026-10-02): every captured create whose request carries an id answered 500 (StaleObjectStateException from <X>RepositoryImpl.save, 'id == null ? persist : merge') where the source answered 201 with a newly generated id",
+      "source": "https://docs.hibernate.org/orm/6.6/migration-guide/migration-guide.html#merge-versioned-deleted (\"Previously, merging a detached entity resulted in a SQL insert whenever there was no matching row in the database ... An OptimisticLockException is now thrown\"); https://docs.spring.io/spring-data/jpa/reference/jpa/entity-persistence.html (a null id or null non-primitive version is new and persisted, anything else is merged)",
+      "checked_by": [
+        "skills/migration/fix-until-green/scripts/merge-without-row-runtime.test.py (pinned platform, PostgreSQL 16: the literal merge answers 500 with OptimisticLockException/StaleObjectStateException and stores nothing; the port answers 201 with a generated id read back by a later request)",
+        "M4 parity over the create scenarios"
+      ]
+    }
+  },
+  "validation_helpers": {
+    "note": "Spring validation types used OUTSIDE a handler's parameter list -- a helper such as an error-response class whose constructor or method takes the BindingResult, Errors or FieldError the handler used to pass (V17-2). The compat layer has none of these types, and after the handler_parameters BindingResult translation the handler holds a Set<ConstraintViolation<T>> instead. Each row is conditional: `when` says which member it applies to; `action` is the documented replacement, derived from the Bean Validation and Spring javadoc the row cites and from nothing specific to a specimen. KEYS ARE QUALIFIED IDENTITIES (a helper's parameter type resolved through the file's imports, or through a wildcard import of the package a unit seals); the planner renders a row only at a member that actually takes the type.",
+    "org.springframework.validation.BindingResult": {
+      "kind": "type",
+      "when": "a constructor or method that is NOT an HTTP handler takes a BindingResult or Errors (an error-response helper the handler fed with its BindingResult)",
+      "action": "change that parameter to Set<? extends ConstraintViolation<?>> (jakarta.validation.ConstraintViolation) and have the handler pass the set validator.validate(<body>) returned; where the helper walked bindingResult.getFieldErrors(), iterate the violations and read each FieldError accessor from its ConstraintViolation equivalent (FieldError.getField() -> violation.getPropertyPath().toString(), getDefaultMessage() -> getMessage(), getRejectedValue() -> getInvalidValue(), getObjectName() -> java.beans.Introspector.decapitalize(violation.getRootBeanClass().getSimpleName())); keep the helper's output (the header or body it renders) exactly as it was",
+      "mapping": {
+        "getField()": "getPropertyPath().toString()",
+        "getDefaultMessage()": "getMessage()",
+        "getRejectedValue()": "getInvalidValue()",
+        "getObjectName()": "java.beans.Introspector.decapitalize(violation.getRootBeanClass().getSimpleName())"
+      },
+      "source": "https://jakarta.ee/specifications/bean-validation/3.0/apidocs/jakarta/validation/constraintviolation (a violation carries its property path, message, invalid value and root bean class); https://docs.spring.io/spring-framework/docs/5.3.x/javadoc-api/org/springframework/validation/FieldError.html; https://github.com/spring-projects/spring-framework/blob/v5.3.31/spring-core/src/main/java/org/springframework/core/Conventions.java (getVariableNameForParameter) and .../util/ClassUtils.java (getShortNameAsProperty)",
+      "object_name": "getObjectName() is the BINDING name Spring gave the validated @RequestBody, not the class name: RequestResponseBodyMethodProcessor binds it under Conventions.getVariableNameForParameter, which for a non-collection, non-array type is ClassUtils.getShortNameAsProperty = java.beans.Introspector.decapitalize(<short name>) (OwnerDto -> ownerDto, URLDto -> URLDto). A body declared as a collection or array is named differently (Conventions pluralizes, e.g. ownerDtoList): that shape is unresolved here and the source capture's errors header decides. Checked by validation-object-name.test.py (Spring's own ClassUtils against this expression) and by M4 parity on the errors header (M-3 2026-09-30: the v28 candidate rendered OwnerDto where the source sent ownerDto)"
+    },
+    "org.springframework.validation.FieldError": {
+      "kind": "type",
+      "when": "a constructor or method that is NOT an HTTP handler takes a FieldError (one row of an error response)",
+      "action": "change that parameter to ConstraintViolation<?> (jakarta.validation.ConstraintViolation) and read FieldError.getField() as violation.getPropertyPath().toString(), getDefaultMessage() as getMessage(), getRejectedValue() as getInvalidValue(), getObjectName() as java.beans.Introspector.decapitalize(violation.getRootBeanClass().getSimpleName()); keep the output the helper renders exactly as it was",
+      "mapping": {
+        "getField()": "getPropertyPath().toString()",
+        "getDefaultMessage()": "getMessage()",
+        "getRejectedValue()": "getInvalidValue()",
+        "getObjectName()": "java.beans.Introspector.decapitalize(violation.getRootBeanClass().getSimpleName())"
+      },
+      "source": "https://jakarta.ee/specifications/bean-validation/3.0/apidocs/jakarta/validation/constraintviolation; https://docs.spring.io/spring-framework/docs/5.3.x/javadoc-api/org/springframework/validation/FieldError.html; https://github.com/spring-projects/spring-framework/blob/v5.3.31/spring-core/src/main/java/org/springframework/core/Conventions.java (getVariableNameForParameter) and .../util/ClassUtils.java (getShortNameAsProperty)",
+      "object_name": "getObjectName() is the BINDING name Spring gave the validated @RequestBody, not the class name: RequestResponseBodyMethodProcessor binds it under Conventions.getVariableNameForParameter, which for a non-collection, non-array type is ClassUtils.getShortNameAsProperty = java.beans.Introspector.decapitalize(<short name>) (OwnerDto -> ownerDto, URLDto -> URLDto). A body declared as a collection or array is named differently (Conventions pluralizes, e.g. ownerDtoList): that shape is unresolved here and the source capture's errors header decides. Checked by validation-object-name.test.py (Spring's own ClassUtils against this expression) and by M4 parity on the errors header (M-3 2026-09-30: the v28 candidate rendered OwnerDto where the source sent ownerDto)"
+    },
+    "org.springframework.validation.Errors": {
+      "kind": "type",
+      "when": "a constructor or method that is NOT an HTTP handler takes a BindingResult or Errors (an error-response helper the handler fed with its BindingResult)",
+      "action": "change that parameter to Set<? extends ConstraintViolation<?>> (jakarta.validation.ConstraintViolation) and have the handler pass the set validator.validate(<body>) returned; where the helper walked bindingResult.getFieldErrors(), iterate the violations and read each FieldError accessor from its ConstraintViolation equivalent (FieldError.getField() -> violation.getPropertyPath().toString(), getDefaultMessage() -> getMessage(), getRejectedValue() -> getInvalidValue(), getObjectName() -> java.beans.Introspector.decapitalize(violation.getRootBeanClass().getSimpleName())); keep the helper's output (the header or body it renders) exactly as it was",
+      "mapping": {
+        "getField()": "getPropertyPath().toString()",
+        "getDefaultMessage()": "getMessage()",
+        "getRejectedValue()": "getInvalidValue()",
+        "getObjectName()": "java.beans.Introspector.decapitalize(violation.getRootBeanClass().getSimpleName())"
+      },
+      "source": "https://jakarta.ee/specifications/bean-validation/3.0/apidocs/jakarta/validation/constraintviolation (a violation carries its property path, message, invalid value and root bean class); https://docs.spring.io/spring-framework/docs/5.3.x/javadoc-api/org/springframework/validation/FieldError.html; https://github.com/spring-projects/spring-framework/blob/v5.3.31/spring-core/src/main/java/org/springframework/core/Conventions.java (getVariableNameForParameter) and .../util/ClassUtils.java (getShortNameAsProperty)",
+      "object_name": "getObjectName() is the BINDING name Spring gave the validated @RequestBody, not the class name: RequestResponseBodyMethodProcessor binds it under Conventions.getVariableNameForParameter, which for a non-collection, non-array type is ClassUtils.getShortNameAsProperty = java.beans.Introspector.decapitalize(<short name>) (OwnerDto -> ownerDto, URLDto -> URLDto). A body declared as a collection or array is named differently (Conventions pluralizes, e.g. ownerDtoList): that shape is unresolved here and the source capture's errors header decides. Checked by validation-object-name.test.py (Spring's own ClassUtils against this expression) and by M4 parity on the errors header (M-3 2026-09-30: the v28 candidate rendered OwnerDto where the source sent ownerDto)"
+    }
+  },
+  "build_plugins": {
+    "note": "Build plugins that GENERATE the destination's sources, and what their documented generators do to a request body (H7). A request body type that lives under target/generated-sources is owned by its generator's configuration in pom.xml, never by the controller: the planner (worklist.generated_body_binding) reads the generated type's constructor from the compiler model, compares the properties it requires with the recorded request body, and cites the row here. Rows are documentation from the generator's official reference; each option is quoted with its documented description and default. Nothing here is inferred from a specimen.",
+    "org.openapitools:openapi-generator-maven-plugin": {
+      "docs": "https://openapi-generator.tech/docs/plugins/",
+      "option_location": "a generator option goes under <configuration><configOptions><NAME>VALUE</NAME></configOptions> of the plugin (or of the execution that runs the generator)",
+      "generators": {
+        "jaxrs-spec": {
+          "source": "https://openapi-generator.tech/docs/generators/jaxrs-spec",
+          "models": "a model class gets a @JsonCreator constructor whose parameters carry @JsonProperty(required = true) for every property the spec's schema lists under `required` (generateJsonCreator, default true); Jackson then refuses a body that lacks one of those keys before any handler runs (a 400 at the boundary). The `spring` generator (library spring-boot) the legacy build used binds models through setters, so the same body was accepted there.",
+          "required_args_constructor": {
+            "option": "generateJsonCreator",
+            "description": "Whether to generate @JsonCreator constructor for required properties.",
+            "default": "true",
+            "value_that_stops_it": "false",
+            "where": "configOptions"
+          },
+          "related_options": [
+            {
+              "option": "generateBuilders",
+              "description": "Whether to generate builders for models",
+              "default": "false"
+            },
+            {
+              "option": "generateConstructorWithAllArgs",
+              "description": "whether to generate a constructor for all arguments",
+              "default": "false"
+            },
+            {
+              "option": "useJakartaEe",
+              "description": "whether to use Jakarta EE namespace instead of javax",
+              "default": "false"
+            },
+            {
+              "option": "library",
+              "description": "library template (sub-template) to use: <default> (JAXRS spec only, to be deployed in an app server), quarkus, thorntail, openliberty, helidon, kumuluzee",
+              "default": "<default>"
+            }
+          ],
+          "action": "set <generateJsonCreator>false</generateJsonCreator> under the plugin's <configOptions> in pom.xml (the generator then emits no required-args @JsonCreator constructor and the model binds through its setters, as the spring generator's did) and keep <useBeanValidation>true</useBeanValidation> (the model's constraints are what the handler validates); leave the spec's `required` lists as they are unless the source's contract does not require the property either. Do not edit the generated file (the next build rewrites it) and do not touch the controller for this difference.",
+          "observation": "a @ControllerAdvice/@ExceptionHandler that turns the deserialization failure into a body in the source is a separate concern: the destination's platform answers the boundary refusal itself, and whether a mapper renders a body is a build-profile/mapping question, not this obligation's.",
+          "when": "a conditional rule (V16-8): the request body type is generated by this generator, its generated @JsonCreator constructor (or, while target/ is stale, the spec's `required` list) requires a property the source's recorded request does not send, and the pom does not already set generateJsonCreator=false. Then the item is a PARITY_GENERATED_BODY build obligation on pom.xml and this row's action is its FIRST ACTION.",
+          "keep": {
+            "useBeanValidation": {
+              "value": "true",
+              "why": "the model's constraints (@NotNull, @Size, nested @Valid) are what the handler's validator reads; generateJsonCreator only removes the required-args constructor, a container property stays initialized to an empty list, so the constraint on it still holds for a body that omits it"
+            }
+          },
+          "evidence": "the documented jaxrs-spec option (source above); a v10 accepted repair made exactly this edit (commit 7df34470, c:9c5fb3d1b7e3) and v16 verified the regenerated DTO loses its @JsonCreator constructor; skills/migration/fix-until-green/scripts/handler-validation-package.test.py packages both settings",
+          "binding": {
+            "kind": "creator",
+            "while": "generateJsonCreator is not false (default true)",
+            "omitted_required": "Jackson refuses the body before the handler (an empty 400 at the boundary)",
+            "source": "https://openapi-generator.tech/docs/generators/jaxrs-spec (generateJsonCreator)"
+          },
+          "required_read_only": {
+            "fact": "jaxrs-spec 7.25.0 omits @NotNull on a property the spec lists as `required` AND marks readOnly: its template JavaJaxRS/spec/beanValidation.mustache begins {{#required}}{{^isReadOnly}}@NotNull {{/isReadOnly}}{{/required}}. The spring generator the legacy build used (5.2.1, library spring-boot) annotates every required property @NotNull, readOnly or not, so the source answered an explicit null with 400 and the errors row 'must not be null' while the destination binds the null and fails later (the v28 candidate: NullPointerException in the mapper, 500)",
+            "when": "a request-body model property is required and readOnly in the spec, the source generated model carried @NotNull on it (or a source capture answers 400 'must not be null' for an explicit null of it), and the destination's generated getter carries no @NotNull",
+            "action": "restore the constraint through the generator, never in the generated file: add <templateDirectory>${project.basedir}/src/main/openapi-templates</templateDirectory> to the plugin's <configuration> and a src/main/openapi-templates/beanValidation.mustache that is 7.25.0's JavaJaxRS/spec/beanValidation.mustache with only `{{^isReadOnly}}` and its closing `{{/isReadOnly}}` removed. Keep generateJsonCreator=false and the field's own initializer (new ArrayList<>()), so an OMITTED property still binds as the empty collection the source accepted (V16-8) and only an explicit null is refused, with the platform's default 'must not be null' message",
+            "unsupported": [
+              "a generator, library or version other than jaxrs-spec/quarkus 7.25.0 (the template text is version-specific)",
+              "a readOnly required property the source did NOT constrain (the source's own generated model decides)",
+              "templates already overridden for another reason (merge by hand is a decision, not this rule)"
+            ],
+            "checked_by": [
+              "skills/migration/fix-until-green/scripts/generated-required-readonly.test.py (generates the model with and without the override offline and validates an explicit null with Hibernate Validator)",
+              "parity:request-body-positive-negative NULL case (generated-body-binding acceptance)"
+            ],
+            "evidence": "M-3 reference qualification 2026-09-30: owner-create-null-pets answered 500 on the v28 candidate where the source answered 400 with errors [{objectName: ownerDto, fieldName: pets, fieldValue: null, errorMessage: must not be null}]; template text read from openapi-generator-7.25.0.jar"
+          }
+        },
+        "spring": {
+          "source": "https://openapi-generator.tech/docs/generators/spring",
+          "models": "the legacy build's generator (library spring-boot): models bind through setters; no required-args constructor unless generatedConstructorWithRequiredArgs is set (default false).",
+          "binding": {
+            "kind": "setters",
+            "omitted_required": "the property stays at its initial value (null, or an initialized empty container) and only the model's bean-validation constraints, checked by the handler's validation, decide the response",
+            "note": "generatedConstructorWithRequiredArgs, where a version has it, adds a constructor without @JsonCreator; Jackson still binds through the no-args constructor and the setters",
+            "source": "https://openapi-generator.tech/docs/generators/spring"
+          }
+        }
+      },
+      "template_source": {
+        "artifact": "org.openapitools:openapi-generator",
+        "version": "the plugin's own version (the codegen artifact is released with it)",
+        "docs": "https://openapi-generator.tech/docs/templating/",
+        "note": "the plugin depends on this artifact; each generator's default templates are entries of its jar (e.g. JavaJaxRS/spec/pojo.mustache). generator-template.py reads them from the local Maven repository, bounded; nothing is downloaded by the lookup."
+      }
+    }
+  },
+  "migration_recipes": {
+    "note": "Qualified transformation recipes for the responsibilities planner.source_requirements derives from the FROZEN source before any destination failure (plan semantics v1). A recipe fixes WHAT the repair is and HOW it is accepted; it is never a second transformation engine. `implementation.kind` is `decided-repairs` (a mechanical operation of bootstrap-destination/scripts/_decided_repairs.py, applied only when decisions.yaml decided_repairs names it, with a receipt row), `agent-bounded` (an M3 worker edits inside the issued write grant; the selected architecture is the cited catalog row and the acceptance checks below are mechanical) or `typed-repair` (V26-1: `operation` is a recipe of the pinned harness executor fix-until-green/typed-repair (pins.typed_repair, OpenRewrite LST, typed references only); brief.py renders `typed-repair.py --root . --cluster <id>` as the issued unit's FIRST ACTION, the executor stages the complete patch inside the issued write grant and records applied | already-in-required-form | not-applicable | unresolved | failed; `covers` names what it edits and `fallback` is the bounded agent procedure an unresolved result returns to, with its reason; the edit is judged by the same acceptance checks as an agent-authored one and a no-op establishes nothing). `acceptance` names the EXISTING independent checks that refuse the recipe's known broken forms: a check a recipe names must exist (source_requirements.test.py resolves every checker and every package-level test). `applies_to` keys are qualified catalog identities; `refuse` lists the conditions under which the requirement stays unresolved and no edit is made. A recipe never widens a write set and never discharges another requirement (the retirement of an adapter-owned annotation discharges no adapter behaviour).",
+    "handler-validation-translation": {
+      "version": "1",
+      "rule": "request-validation",
+      "phase": "m3",
+      "applies_to": [
+        "org.springframework.validation.BindingResult",
+        "org.springframework.validation.Errors"
+      ],
+      "implementation": {
+        "kind": "agent-bounded",
+        "architecture": "handler_parameters.undocumented[<type>].action and .translation: remove the parameter, validate inside the handler with an injected jakarta.validation.Validator BEFORE any side effect, keep every other operand and operator of the source guard verbatim, remove @Valid from the self-validated body (the jakarta.validation.Valid row), keep the DTO's own and nested constraints, build the source's error response from the violations; the errors header's object name is the binding name the SOURCE capture records for that body (Spring names a @RequestBody binding by its conventional bean name), derived from the capture, never the DTO class's simple name and never a constant: Spring's convention is java.beans.Introspector.decapitalize(violation.getRootBeanClass().getSimpleName()) (validation_helpers getObjectName) for a non-collection body; a collection or array body is unresolved"
+      },
+      "acceptance": [
+        {
+          "check": "unit:handler-validation-guards",
+          "checker": "planner.worklist._assess_handler_parameters",
+          "refuses": [
+            "inverted guard",
+            "|| turned into &&",
+            "@Valid kept on a self-validating handler"
+          ]
+        },
+        {
+          "check": "gate:package",
+          "checker": "skills/migration/fix-until-green/scripts/handler-validation-package.test.py",
+          "refuses": [
+            "inverted guard refuses the valid create",
+            "&& persists an invalid create",
+            "kept @Valid answers with the platform report"
+          ]
+        },
+        {
+          "check": "parity:sc",
+          "checker": "skills/paved-road/paved-road-m4/scripts/run-parity.py (M4 parity over the corpus scenarios; asserted_headers_extra: errors) -- a later check",
+          "refuses": [
+            "an errors header whose objectName differs from the source capture's (2026-09-28: v21 09a7faf named it by the DTO's simple name, OwnerDto, where sc_create-invalid-owners-* record ownerDto; reproduced on the pinned platform)"
+          ]
+        }
+      ],
+      "refuse": [
+        "the validated body parameter cannot be identified from the handler signature",
+        "the handler's parameters are not fully resolved"
+      ],
+      "qualification": [
+        "skills/migration/fix-until-green/scripts/validation-object-name.test.py (Spring's own ClassUtils.getShortNameAsProperty against the validation_helpers getObjectName translation)",
+        "skills/migration/fix-until-green/scripts/handler-validation-package.test.py"
+      ]
+    },
+    "handler-uri-parameter": {
+      "version": "1",
+      "rule": "handler-parameter-binding",
+      "phase": "m3",
+      "applies_to": [
+        "org.springframework.web.util.UriComponentsBuilder"
+      ],
+      "precedence": "a qualified handler-parameter action precedes the bare symbol_renames row for the same type (V16-5)",
+      "implementation": {
+        "kind": "typed-repair",
+        "operation": "handler-uri-parameter",
+        "covers": "each sealed HTTP handler's org.springframework.web.util.UriComponentsBuilder parameter becomes @Context jakarta.ws.rs.core.UriInfo uriInfo, and every use <p>.path(<template>)[.path(...)].buildAndExpand(<args>).toUri() becomes uriInfo.getBaseUriBuilder().path(<template>)....build(<args>) in the same edit: templates and arguments verbatim and in order, each argument that is not a non-null literal as java.util.Objects.toString(<arg>, \"\") (location_translation null_argument); an unused parameter is replaced alone. The retired builder API is attributed from the frozen source's own jar (evidence/build/classpath.txt), never assumed.",
+        "unresolved_when": [
+          "any use of the builder outside that chain (passed on, queryParam, build(), a Map expansion, toUriString)",
+          "the handler, the parameter or the builder chain is not attributed (the source's builder jar is absent from evidence/build/classpath.txt or a call does not resolve)",
+          "the handler already has a parameter or name uriInfo, or the file imports another Context, UriInfo or Objects",
+          "jakarta.ws.rs.core.UriInfo, Context or UriBuilder does not resolve on the candidate's classpath",
+          "any sealed site of the request is unresolved: the request applies to all of its sites or to none"
+        ],
+        "architecture": "handler_parameters.undocumented[org.springframework.web.util.UriComponentsBuilder].action: @Context jakarta.ws.rs.core.UriInfo, uriInfo.getBaseUriBuilder().path(<source path template>).build(<ids>) for the Location",
+        "fallback": {
+          "kind": "agent-bounded",
+          "architecture": "handler_parameters.undocumented[org.springframework.web.util.UriComponentsBuilder].action: @Context jakarta.ws.rs.core.UriInfo, uriInfo.getBaseUriBuilder().path(<source path template>).build(<ids>) for the Location"
+        },
+        "qualification": [
+          "skills/migration/fix-until-green/typed-repair/src/test/java/org/rhoai3demo/typedrepair/HandlerUriParameterTest.java",
+          "skills/migration/fix-until-green/scripts/typed-repair.test.py",
+          "skills/migration/fix-until-green/scripts/typed-repair-package.test.py"
+        ]
+      },
+      "acceptance": [
+        {
+          "check": "unit:handler-parameter-sites",
+          "checker": "planner.worklist.handler_parameter_sites",
+          "refuses": [
+            "an unannotated builder left as a handler parameter (a second request body)"
+          ]
+        },
+        {
+          "check": "gate:augmentation",
+          "checker": "skills/migration/fix-until-green/scripts/handler-location-package.test.py",
+          "refuses": [
+            "the bare rename fails augmentation",
+            "a relative Location drops the application base"
+          ]
+        },
+        {
+          "check": "unit:location-null-arguments",
+          "checker": "planner.worklist._location_verdict",
+          "refuses": [
+            "a bare build(<dto>.getId()) where the source expanded a possibly-null value (IllegalArgumentException -> 500)",
+            "the saved entity's id substituted for the source's expression without a decisions.yaml location_arguments authorization",
+            "String.valueOf(<arg>) (expands \"null\")"
+          ]
+        }
+      ],
+      "refuse": [
+        "the handler builds no Location and the parameter has another use the catalog does not document"
+      ]
+    },
+    "retire-adapter-owned-annotation": {
+      "version": "1",
+      "rule": "annotation-retirement",
+      "phase": "m3",
+      "applies_to": [
+        "org.springframework.web.bind.annotation.CrossOrigin"
+      ],
+      "implementation": {
+        "kind": "decided-repairs",
+        "operation": "java_retire_annotation",
+        "architecture": "adapter_owned_annotations[<annotation>].action: delete each resolved site with its arguments and the single-type import; nothing replaces it"
+      },
+      "acceptance": [
+        {
+          "check": "structure:annotation-absent",
+          "checker": "skills/migration/bootstrap-destination/scripts/_decided_repairs.py Engine.java_retire_annotation (post-edit parse: no site resolves to the annotation)",
+          "refuses": [
+            "a site left behind",
+            "another package's annotation of the same simple name removed",
+            "a partial retirement"
+          ]
+        },
+        {
+          "check": "gate:compile",
+          "checker": "planner.worklist.compile_items"
+        }
+      ],
+      "never_discharges": [
+        "adapter-behavior"
+      ],
+      "refuse": [
+        "an annotation name the parse tree and imports cannot resolve",
+        "the destination carries only some of the source's sites"
+      ]
+    },
+    "generated-body-binding": {
+      "version": "1",
+      "rule": "generator-configuration",
+      "phase": "m3",
+      "applies_to": [
+        "org.openapitools:openapi-generator-maven-plugin"
+      ],
+      "qualified": {
+        "jaxrs-spec": {
+          "plugin_versions": [
+            "7.25.0"
+          ],
+          "libraries": [
+            "quarkus"
+          ],
+          "source_generator": "spring",
+          "source_libraries": [
+            "spring-boot"
+          ],
+          "source_plugin_versions": [
+            "5.2.1"
+          ],
+          "evidence": "v17 (tmp/v17-run-20260926/blockers.md V17-4): the source spring/spring-boot 5.2.1 model answered sc_create-owners (a body without pets and id) 201; the destination jaxrs-spec/quarkus 7.25.0 model with the default generateJsonCreator answered an empty 400. A generator, library or version outside these lists is UNRESOLVED, never assumed to bind the same way."
+        }
+      },
+      "implementation": {
+        "kind": "agent-bounded",
+        "architecture": "build_plugins[org.openapitools:openapi-generator-maven-plugin].generators[<name>]: an option changes ONLY under that row's conditional rule (V16-8: the recorded source request omits a property the generated constructor requires and the source accepted it); generateJsonCreator=false, disabled validation or permissive null handling are never a universal workaround; a required readOnly property keeps the source's @NotNull through a generator template override (build_plugins[...].generators[jaxrs-spec].required_read_only), so an explicit null answers 400 'must not be null' while an omitted one still binds as the initialized empty collection"
+      },
+      "acceptance": [
+        {
+          "check": "build:clean-generation",
+          "checker": "skills/migration/fix-until-green/scripts/prepare-initial-analysis.py (regenerated roots) and planner.worklist.generated_body_binding"
+        },
+        {
+          "check": "parity:request-body-positive-negative",
+          "checker": "skills/migration/fix-until-green/scripts/handler-validation-package.test.py",
+          "refuses": [
+            "the default generateJsonCreator=true refuses a valid body that omits the required collection"
+          ],
+          "cases": [
+            "omitted",
+            "null",
+            "empty",
+            "invalid"
+          ],
+          "case_binding": "per required property of each request-body model: OMITTED (the key absent), NULL (the key with null), EMPTY (an empty string, array or object) and INVALID (a negative capture whose value for the property differs from the accepted capture), each bound to the corpus scenarios that send it; a case no capture sends is an UNRESOLVED verification responsibility -- the source's answer is never invented"
+        }
+      ],
+      "refuse": [
+        "a generator name or plugin version the catalog does not qualify",
+        "no recorded source request body to compare",
+        "the source build's generator cannot be read (the legacy pom is not reachable): its binding is unknown"
+      ],
+      "static_trigger": "plan semantics v1: the V16-8 condition is decided from files on disk at M2 -- the destination plugin's generator, library, version and effective generateJsonCreator, the source build's generator (the frozen legacy pom), the spec's `required` list (or the generated @JsonCreator) of every request-body model, and the corpus's recorded source bodies. A required property an ACCEPTED source capture (2xx) omits plans the pom obligation (worklist.static_generated_body_items, rule PARITY_GENERATED_BODY, gate plan) before any create scenario runs; no failing scenario is needed."
+    },
+    "spring-data-fragment-impl": {
+      "version": "1",
+      "rule": "repository-architecture",
+      "phase": "m3",
+      "applies_to": [],
+      "implementation": {
+        "kind": "typed-repair",
+        "operation": "fragment-cdi-exposure",
+        "covers": "the CDI exposure only: @jakarta.enterprise.context.ApplicationScoped and @jakarta.enterprise.inject.Typed(<Fragment>Impl.class) applied together on an EXISTING <Fragment>Impl in the fragment's package that implements the fragment; profile annotations, interfaces and member bodies are kept byte for byte. It never writes an owed file or a member body.",
+        "unresolved_when": [
+          "the owed <Fragment>Impl does not exist yet (its member bodies are the bounded agent procedure; run the executor again after writing them)",
+          "a member calls back through the fragment or a type assignable to it on anything but this (v29 routed-back recursion)",
+          "an annotation or call of the implementation is not attributed on the candidate's classpath",
+          "the implementation already carries another scope or a Spring stereotype",
+          "jakarta.enterprise.context.ApplicationScoped or jakarta.enterprise.inject.Typed does not resolve on the candidate's classpath"
+        ],
+        "architecture": "planner.worklist.FRAGMENT_IMPL_CONTRACT: the <Fragment>Impl in the fragment's package, @ApplicationScoped and @Typed restricted to its own concrete class, @Typed(<Fragment>Impl.class) (worklist.fragment_cdi_exposure; the generated Spring Data repository stays the bean of the fragment interface), one intended injectable implementation per contract in the decided build profile; a query the selected source implementation writes is kept as JPQL over entity PROPERTY paths: a source query naming table columns (WHERE type_id=, WHERE pet_id=) ran on Hibernate 5 and is rejected by Hibernate 6+ (SemanticException), so the destination navigates the mapped association (pet.type.id, visit.pet.id) -- the selected implementation's effects, not an inactive profile's and not a text replacement; each owed member carries that behaviour itself (an injected EntityManager with the source's JPQL), never by calling back through a Spring Data repository that extends the fragment: Quarkus routes every fragment method of that repository to <Fragment>Impl, so the call recurses (v29 StackOverflowError, worklist.fragment_routed_back)",
+        "fallback": {
+          "kind": "agent-bounded",
+          "architecture": "planner.worklist.FRAGMENT_IMPL_CONTRACT: the <Fragment>Impl in the fragment's package, @ApplicationScoped and @Typed restricted to its own concrete class, @Typed(<Fragment>Impl.class) (worklist.fragment_cdi_exposure; the generated Spring Data repository stays the bean of the fragment interface), one intended injectable implementation per contract in the decided build profile; a query the selected source implementation writes is kept as JPQL over entity PROPERTY paths: a source query naming table columns (WHERE type_id=, WHERE pet_id=) ran on Hibernate 5 and is rejected by Hibernate 6+ (SemanticException), so the destination navigates the mapped association (pet.type.id, visit.pet.id) -- the selected implementation's effects, not an inactive profile's and not a text replacement; each owed member carries that behaviour itself (an injected EntityManager with the source's JPQL), never by calling back through a Spring Data repository that extends the fragment: Quarkus routes every fragment method of that repository to <Fragment>Impl, so the call recurses (v29 StackOverflowError, worklist.fragment_routed_back)"
+        },
+        "qualification": [
+          "skills/migration/fix-until-green/typed-repair/src/test/java/org/rhoai3demo/typedrepair/FragmentCdiExposureTest.java",
+          "skills/migration/fix-until-green/scripts/typed-repair.test.py",
+          "skills/migration/fix-until-green/scripts/typed-repair-package.test.py"
+        ]
+      },
+      "acceptance": [
+        {
+          "check": "unit:fragment-implementation",
+          "checker": "planner.worklist._assess_implementations",
+          "refuses": [
+            "a fragment member no implementation declares",
+            "a member that calls back through a Spring Data repository extending the fragment (v29 routed-back recursion, worklist.fragment_routed_back)"
+          ]
+        },
+        {
+          "check": "unit:fragment-behaviour-bodies",
+          "checker": "planner.worklist.owed_member_body",
+          "refuses": [
+            "an owed member whose whole body is one throw (any exception type)",
+            "an owed member with an empty body (a no-op mutator)",
+            "an owed member that only returns a placeholder (null, a literal, an empty collection or Optional)",
+            "an owed member that only delegates to a private helper that is itself one of those"
+          ],
+          "behaviour_source": "compat-mapping repository_behaviour: the selected profile's repository, its override fragment, @Query or CRUD default; never an inactive-profile implementation"
+        },
+        {
+          "check": "behavior:repository-effects",
+          "checker": "planner.source_requirements.repository_verification (planned); M4 parity over the corpus scenarios that reach the member",
+          "refuses": [
+            "reads pass, writes do nothing: a write member accepted without a committed effect read back across a request boundary",
+            "a delete or read whose JPQL names table columns (2026-09-28 probe: the source's override fragments' 'WHERE type_id=' / 'WHERE pet_id=' fail at runtime on Hibernate 7)"
+          ],
+          "unresolved_when": "no captured scenario reaches the member's write effect: the responsibility stays open (coverage unresolved), never PASS"
+        },
+        {
+          "check": "structure:single-injectable-implementation",
+          "checker": "skills/migration/fix-until-green/scripts/fragment-cdi-package.test.py",
+          "refuses": [
+            "an unrestricted implementation that is also a bean of the repository type (ambiguous injection)"
+          ]
+        }
+      ],
+      "refuse": [
+        "the fragment has no <Fragment>Impl in the source",
+        "several implementations in the selected profile",
+        "profile-gated implementations with no decided build profile"
+      ]
+    },
+    "servlet-redirect-response": {
+      "version": "1",
+      "rule": "handler-parameter-binding",
+      "phase": "m3",
+      "applies_to": [
+        "jakarta.servlet.http.HttpServletResponse",
+        "javax.servlet.http.HttpServletResponse"
+      ],
+      "requires_calls": {
+        "owners": [
+          "jakarta.servlet.http.HttpServletResponse",
+          "javax.servlet.http.HttpServletResponse",
+          "jakarta.servlet.ServletResponse",
+          "javax.servlet.ServletResponse"
+        ],
+        "names": [
+          "sendRedirect"
+        ],
+        "gap": "servlet-response-member",
+        "note": "qualified only when the handler calls the response and every call on it is one of names; any other response member leaves the requirement unresolved with this capability gap (source_requirements.derive)"
+      },
+      "precedence": "a qualified handler-parameter action precedes any package rename; the catalog carries no javax.servlet rename",
+      "runtime_findings": {
+        "gates": [
+          "package"
+        ],
+        "causes": [
+          "unsupported-spel"
+        ],
+        "why": "the recipe removes the field that injected the Servlet context through SpEL (response_translation.forbidden_field_injection), which is exactly what the package gate refuses with 'SpEL expressions are not supported' at the handler's file: a package-gate finding of this cause inside the requirement's own paths is this requirement owner's obligation, never a separate runtime outcome that both waits on and blocks it (planner.compatibility_objectives.absorb_recipe_runtime_findings; v28 preserved evidence)"
+      },
+      "implementation": {
+        "kind": "agent-bounded",
+        "architecture": "handler_parameters.undocumented[jakarta.servlet.http.HttpServletResponse].action: ResponseEntity<Void> 302 Found with Location uriInfo.getBaseUriBuilder().path(<target after the context path>).build() from a @Context jakarta.ws.rs.core.UriInfo handler parameter"
+      },
+      "acceptance": [
+        {
+          "check": "unit:handler-parameter-sites",
+          "checker": "planner.worklist.handler_parameter_sites",
+          "refuses": [
+            "the handler still takes the Servlet response",
+            "the handler deleted instead of translated",
+            "a handler that returns void or sets no Location (the redirect dropped)",
+            "a field that read the Servlet context through SpEL left on the handler's type"
+          ]
+        },
+        {
+          "check": "gate:augmentation",
+          "checker": "skills/migration/fix-until-green/scripts/servlet-redirect-package.test.py",
+          "refuses": [
+            "the jakarta.servlet rename does not compile on the pinned stack",
+            "a relative Location (URI.create of the context-relative target) answers where the source answered an absolute one"
+          ]
+        }
+      ],
+      "refuse": [
+        "the handler calls a Servlet response member other than sendRedirect (capability gap servlet-response-member)",
+        "the handler never calls the response it takes"
+      ]
+    },
+    "exception-advice-registration": {
+      "version": "1",
+      "rule": "exception-advice",
+      "phase": "m3",
+      "applies_to": [
+        "org.springframework.web.bind.annotation.ControllerAdvice",
+        "org.springframework.web.bind.annotation.RestControllerAdvice"
+      ],
+      "implementation": {
+        "kind": "agent-bounded",
+        "architecture": "register the source's exception advice where the destination scans it: annotate the advice class @RestControllerAdvice (Quarkus spring-web: its @ExceptionHandler methods become global Jakarta REST exception mappers; handler returns ResponseEntity or Map), or port each handler to a Jakarta REST mapper defined OUTSIDE a resource class (@ServerExceptionMapper, or a @Provider ExceptionMapper). Preserve what the source answered for each scenario the advice produced: the status, the media type and the body's keys (D-2: the values are each platform's own diagnostics)"
+      },
+      "acceptance": [
+        {
+          "check": "structure:annotation-absent",
+          "checker": "planner.requirement_checks.measure (structure:annotation-absent over the destination model: the unscanned annotation is gone from the advice's file)"
+        },
+        {
+          "check": "gate:compile",
+          "checker": "planner.worklist.compile_items"
+        },
+        {
+          "check": "parity:<scenario>",
+          "checker": "planner.requirement_checks.measure (parity:<scenario> for every captured scenario whose SOURCE response has the advice's model-derived shape, planner.exception_advice.advice_scenarios)"
+        }
+      ],
+      "refuse": [
+        "an advice left as a plain @ControllerAdvice (compiles, never registered)",
+        "a mapper declared inside a resource class (applies only to that class's exceptions)"
+      ],
+      "source": "https://quarkus.io/guides/spring-web (supported annotations: @RestControllerAdvice -- only the @ExceptionHandler capability; @ExceptionHandler only in a @RestControllerAdvice class; return types ResponseEntity and Map); https://quarkus.io/guides/rest (Exception mapping: @ServerExceptionMapper; global when defined outside a REST endpoint class)"
+    }
+  },
+  "objective_families": {
+    "note": "Compatibility objectives (planner.compatibility_objectives, policy compatibility-objectives/v1, decisions.loop.compatibility_objectives). A family is ONE named change to an application contract; its transformations list the qualified symbols (a package and the types it exports are aliases of one transformation) or the MTA rules it retires, and its requirement_rules the source requirements that belong to that change. Admitted units of one family that share a site (the same file, for symbol families; the same rule, for rule families) compose into ONE bounded executable scope; independent components stay separate; a unit no family names stays its own objective. Composition is judged by these rows and qualified source facts only -- never by a layer, a file name or a package spelling. Borrowed from OpenRewrite/Moderne: small transformations composed into a larger one where partial application cannot meet the checkpoint (https://docs.openrewrite.org/concepts-and-explanations/recipes), applicability decided before editing (https://docs.openrewrite.org/reference/yaml-format-reference), and coupled incompatible changes applied together (https://docs.moderne.io/hands-on-learning/spring-boot-migration/module-6-wave-migration/). No recipe engine is run.",
+    "version": "1",
+    "families": {
+      "collection-sorting": {
+        "title": "preserve collection sorting",
+        "transformations": [
+          {
+            "id": "spring-beans-support-sort",
+            "symbols": [
+              "org.springframework.beans.support",
+              "org.springframework.beans.support.PropertyComparator",
+              "org.springframework.beans.support.MutableSortDefinition"
+            ]
+          }
+        ],
+        "acceptance_intent": "the source comparator's property, direction, case and null semantics, tested on actual order -- not symbol absence alone",
+        "source_semantics": "PropertyComparator.sort(list, new MutableSortDefinition(<property>, <ignoreCase>, <ascending>)) sorts by the bean property in place: the THIRD argument is ascending (false = descending); with ignoreCase both String values are compared after String.toLowerCase(); a null value sorts after every non-null value and the whole result is negated for a descending sort (so nulls come FIRST when descending); Collections.sort is stable (equal keys keep their input order)",
+        "action": "replace PropertyComparator.sort(<list>, new MutableSortDefinition(\"<p>\", <ignoreCase>, <ascending>)) with <list>.sort(Comparator.comparing(<x -> x.get<P>()>, Comparator.nullsLast(Comparator.naturalOrder()))), mapping the key through (v == null ? null : v.toLowerCase()) when ignoreCase, and appending .reversed() when ascending is false; keep the collection type and never add spring-beans (skills/migration/spring-to-quarkus-patterns/references/sorting.md)",
+        "unsupported": [
+          "a nested property path (\"owner.lastName\") or a property that is not a readable bean getter",
+          "a MutableSortDefinition changed at runtime (toggleAscendingOnProperty, setProperty) -- the order is not a constant of the call",
+          "values that are not Comparable (Spring then keeps the input order for them; decide from the source's data)"
+        ],
+        "checks": [
+          "skills/migration/fix-until-green/scripts/sorting-oracle.test.py (Spring's own PropertyComparator against this action over nulls, case and ties in both directions)",
+          "skills/migration/fix-until-green/scripts/collection-sorting-runtime.test.py (the action on a destination package on the pinned platform serves Spring's PropertyComparator order; no-reversed and nullsFirst controls differ)",
+          "M4 parity order (worklist body_diff order_explained)"
+        ],
+        "source": "https://github.com/spring-projects/spring-framework/blob/v5.3.14/spring-beans/src/main/java/org/springframework/beans/support/PropertyComparator.java; .../MutableSortDefinition.java"
+      },
+      "retired-configuration-rule": {
+        "title": "retire an obsolete configuration rule",
+        "rules": [
+          "springboot-properties-to-quarkus-00003"
+        ],
+        "acceptance_intent": "every occurrence satisfies the same rule; main, test and profile files keep their own effective settings"
+      },
+      "profile-selection": {
+        "title": "translate profile selection",
+        "transformations": [
+          {
+            "id": "spring-profile",
+            "symbols": [
+              "org.springframework.context.annotation.Profile"
+            ]
+          }
+        ],
+        "acceptance_intent": "the selected profile's beans stay selected and the others stay out; not a claim that repository behaviour works"
+      },
+      "spring-dao-exceptions": {
+        "title": "translate Spring DAO exceptions",
+        "transformations": [
+          {
+            "id": "spring-dao",
+            "symbols": [
+              "org.springframework.dao",
+              "org.springframework.dao.DataAccessException",
+              "org.springframework.dao.EmptyResultDataAccessException"
+            ]
+          }
+        ],
+        "acceptance_intent": "the checked contract is retired while throws/catch behaviour is preserved"
+      },
+      "spring-orm-exceptions": {
+        "title": "translate Spring ORM exceptions",
+        "transformations": [
+          {
+            "id": "spring-orm",
+            "symbols": [
+              "org.springframework.orm",
+              "org.springframework.orm.ObjectRetrievalFailureException"
+            ]
+          }
+        ],
+        "acceptance_intent": "the lookup-failure contract is preserved on the platform exception"
+      },
+      "transaction-annotations": {
+        "title": "translate transaction annotations",
+        "transformations": [
+          {
+            "id": "spring-transactional",
+            "symbols": [
+              "org.springframework.transaction.annotation",
+              "org.springframework.transaction.annotation.Transactional"
+            ]
+          }
+        ],
+        "acceptance_intent": "the source transaction boundaries and propagation are preserved",
+        "source_semantics": "Spring's @org.springframework.transaction.annotation.Transactional on a class or public method demarcates a transaction (REQUIRED by default) that rolls back on RuntimeException and Error; attributes select propagation, isolation, timeout, read-only, rollback rules and the transaction manager",
+        "action": "replace it at the SAME element with @jakarta.transaction.Transactional (never delete the boundary): propagation -> value (TxType) by `propagation` below; rollbackFor -> rollbackOn; noRollbackFor -> dontRollbackOn; readOnly=true -> drop only the attribute and keep the annotation (JTA has no read-only transaction); a default attribute needs nothing. The method must not be private (ArC does not intercept it: quarkus.arc.fail-on-intercepted-private-method); the default rollback rules match (unchecked exceptions and errors)",
+        "propagation": {
+          "REQUIRED": "REQUIRED",
+          "REQUIRES_NEW": "REQUIRES_NEW",
+          "SUPPORTS": "SUPPORTS",
+          "NOT_SUPPORTED": "NOT_SUPPORTED",
+          "MANDATORY": "MANDATORY",
+          "NEVER": "NEVER",
+          "NESTED": null
+        },
+        "attributes": {
+          "value": "unsupported (a named transaction manager is a decision)",
+          "transactionManager": "unsupported (a decision)",
+          "label": "dropped (descriptive only)",
+          "propagation": "value (TxType), mapped above; NESTED unsupported",
+          "isolation": "unsupported unless DEFAULT (JTA has no per-transaction isolation: a datasource decision)",
+          "timeout": "unsupported unless -1 (a Narayana configuration decision: quarkus.transaction-manager.default-transaction-timeout or @TransactionConfiguration)",
+          "timeoutString": "unsupported unless empty (as timeout)",
+          "readOnly": "dropped; the annotation stays",
+          "rollbackFor": "rollbackOn",
+          "rollbackForClassName": "rollbackOn (the named classes, resolved)",
+          "noRollbackFor": "dontRollbackOn",
+          "noRollbackForClassName": "dontRollbackOn (the named classes, resolved)"
+        },
+        "unsupported": [
+          "propagation NESTED (no savepoint semantics in JTA)",
+          "a non-default isolation, timeout or named transaction manager (a decision, not a rename)",
+          "@Transactional on a private method (move the boundary to a non-private method; never drop it)"
+        ],
+        "checks": [
+          "skills/migration/fix-until-green/scripts/transaction-mapping.test.py (spring-tx's own @Transactional attributes and Propagation constants against this table and jakarta.transaction's TxType)",
+          "skills/migration/fix-until-green/scripts/transaction-runtime.test.py (the translated boundaries on the pinned platform and PostgreSQL 16: default rollback rules, rollbackOn/dontRollbackOn, REQUIRES_NEW vs REQUIRED, committed state read back by a later request; a private boundary fails the build)",
+          "behavior:repository-effects (committed effects read back across a request boundary)"
+        ],
+        "source": "https://jakarta.ee/specifications/transactions/2.0/apidocs/jakarta/transaction/transactional; https://docs.spring.io/spring-framework/docs/5.3.x/javadoc-api/org/springframework/transaction/annotation/Transactional.html; skills/migration/spring-to-quarkus-patterns/references/cdi-service-facade.md"
+      },
+      "controller-request-boundary": {
+        "title": "translate controller request boundaries",
+        "transformations": [
+          {
+            "id": "spring-validation",
+            "symbols": [
+              "org.springframework.validation",
+              "org.springframework.validation.BindingResult",
+              "org.springframework.validation.Errors",
+              "org.springframework.validation.FieldError"
+            ]
+          },
+          {
+            "id": "spring-uri-builder",
+            "symbols": [
+              "org.springframework.web.util",
+              "org.springframework.web.util.UriComponentsBuilder",
+              "org.springframework.web.util.UriComponents"
+            ]
+          },
+          {
+            "id": "adapter-owned-crossorigin",
+            "symbols": [
+              "org.springframework.web.bind.annotation.CrossOrigin"
+            ]
+          },
+          {
+            "id": "servlet-response",
+            "symbols": [
+              "jakarta.servlet.http",
+              "jakarta.servlet.http.HttpServletResponse",
+              "jakarta.servlet.http.HttpServletRequest",
+              "javax.servlet.http",
+              "javax.servlet.http.HttpServletResponse",
+              "javax.servlet.http.HttpServletRequest"
+            ]
+          }
+        ],
+        "requirement_rules": [
+          "request-validation",
+          "handler-parameter-binding",
+          "annotation-retirement"
+        ],
+        "acceptance_intent": "guard polarity and connectives, body validation before side effects, the injected URI context and Location, annotation retirement, a Servlet response or request use translated to a documented return type or annotations; CORS behaviour stays the adapter's"
+      },
+      "selected-repository-implementation": {
+        "title": "implement the selected repository contract",
+        "requirement_rules": [
+          "repository-architecture"
+        ],
+        "subject": "facts.repository",
+        "fragment_symbol_exception": true,
+        "acceptance_intent": "the source-selected behaviour, no stub bodies, one intended injectable implementation; runtime effects stay owed to verification"
+      }
+    }
+  },
+  "exception_advice": {
+    "note": "Behaviour a source exception advice (@ControllerAdvice/@RestControllerAdvice with @ExceptionHandler) produced that the destination platform answers BEFORE the advice can run (ADR-025). A row applies to a parity obligation whose SOURCE capture is the advice's response (response_equivalence.deserialization_advice over the frozen source oracle, never the destination response); brief.py renders its action as a documented first action on that card.",
+    "request-body-unreadable": {
+      "adr": "ADR-025",
+      "source_semantics": "the source's advice caught Spring's HttpMessageNotReadableException (a malformed JSON document or a value of the wrong type) and answered 400 with the advice's own body and media type (a String body: text/plain;charset=UTF-8) -- here the JSON object {className, exMessage}",
+      "when": "a parity obligation whose source capture is a 400 {className, exMessage} naming the source framework's body-read failure",
+      "action": "keep the advice as it is, and add two jakarta.ws.rs.ext.ExceptionMapper @Provider classes beside it that answer through the advice's OWN handler method (new <Advice>().<handler>(e), or the injected bean) with the status it returns, the media type the source capture recorded and its body: one for com.fasterxml.jackson.databind.exc.MismatchedInputException (the platform's Jackson reader rethrows a wrong-type value as-is, and its built-in mapper answers an empty 400), and one for jakarta.ws.rs.WebApplicationException that handles ONLY a cause of type com.fasterxml.jackson.core.exc.StreamReadException (a malformed document is wrapped in a 400 WebApplicationException) and returns e.getResponse() for every other one. Never hard-code the source framework's class name or message: the values are the destination's own diagnostics (ADR-025 compares them as present, non-empty strings)",
+      "unsupported": [
+        "an advice whose body depends on request state the mapper cannot see",
+        "a source capture whose body is not the advice's (another exception path): not this row"
+      ],
+      "checks": [
+        "skills/migration/fix-until-green/scripts/deserialization-advice-runtime.test.py (the advice alone answers an empty 400; with the two mappers both failures answer 400 text/plain with non-empty {className, exMessage}; a readable body still creates)",
+        "M4 parity under ADR-025 (status, media type and keys enforced; values present)"
+      ],
+      "source": "quarkus-rest-jackson 3.27.3 FullyFeaturedServerJacksonMessageBodyReader.readFrom (MismatchedInputException rethrown; StreamReadException wrapped in WebApplicationException(BAD_REQUEST)), read from the pinned jar; https://jakarta.ee/specifications/restful-ws/3.1/jakarta-restful-ws-spec-3.1#exceptionmapper"
+    },
+    "advice_annotations": [
+      "org.springframework.web.bind.annotation.ControllerAdvice",
+      "org.springframework.web.bind.annotation.RestControllerAdvice"
+    ],
+    "unscanned_on_destination": {
+      "annotations": [
+        "org.springframework.web.bind.annotation.ControllerAdvice"
+      ],
+      "why": "Quarkus spring-web registers the @ExceptionHandler methods of a @RestControllerAdvice class as global Jakarta REST exception mappers (one per handled type) and scans no other advice annotation: a plain @ControllerAdvice compiles on the compatibility layer and is silently never registered",
+      "source": "https://quarkus.io/guides/spring-web (supported annotations: @RestControllerAdvice -- only the @ExceptionHandler capability; @ExceptionHandler only in a @RestControllerAdvice class; return types ResponseEntity and Map)"
+    }
+  }
+}

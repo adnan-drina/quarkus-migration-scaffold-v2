@@ -1,0 +1,2156 @@
+#!/usr/bin/env python3
+"""K2 hook: env-assignment skip + opacity on every command (Operator 090438ZO)."""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+HOOK = Path(__file__).resolve().parent / "pre_tool_call.sh"
+
+# Documented dest-3 t_5981bf7a shapes (hops 214337ZL / AD-020) plus the
+# same encode class Operator counted 15/15 BLOCK. dest-3 is Stopped; this
+# sitting does not dest-exec that log.
+DEST3_OPAQUE = (
+    "echo L3Byb2plY3RzL2xlZ2FjeQ== | base64 -d | xargs ls",
+    "REFERENT=$(echo L3Byb2plY3RzL2xlZ2FjeQ== | base64 -d)",
+    "LEGACY=$(echo L3Byb2plY3RzL2xlZ2FjeQ== | base64 -d)",
+    "ls -la $(echo L29wdC9rYW50cmE= | base64 -d)",
+    "chmod +x $(echo L29wdC9rYW50cmEvamF2YS1leHRlcm5hbC1wcm92aWRlcg== | base64 -d)",
+    "ls $(echo L3Byb2plY3RzL2xlZ2FjeQ== | base64 -d)",
+    "echo L3Byb2plY3RzL2xlZ2FjeQ== | base64 --decode | xargs ls",
+    "echo L29wdC9rYW50cmE= | base64 -D",
+    "echo x | base64 -d | xxd -r",
+    "cd $(echo L3Byb2plY3RzL2xlZ2FjeQ== | base64 -d)",
+    "stat $(echo L29wdC9rYW50cmE= | base64 -d)",
+    "cat $(echo L29wdC9rYW50cmEva2FudHJh | base64 -d)",
+    "eval $(echo ls)",
+    r"printf '\x2fprojects\x2flegacy'",
+    r"$'\x2fprojects\x2flegacy'",
+)
+
+
+def run(
+    cmd: str,
+    roots: list[str],
+    *,
+    cwd: str | None = None,
+    extra_cwd: str | None = None,
+    tool: str = "terminal",
+    extra_env: dict[str, str] | None = None,
+    extra_input: dict | None = None,
+    extra_payload: dict | None = None,
+) -> dict:
+    env = os.environ.copy()
+    env["K2_ALLOW_ROOT"] = os.pathsep.join(roots)
+    if extra_env:
+        env.update(extra_env)
+    payload: dict = {"tool_name": tool, "tool_input": {"command": cmd}}
+    if extra_input:
+        payload["tool_input"].update(extra_input)
+    if extra_payload:
+        payload.update(extra_payload)
+    if cwd is not None:
+        payload["cwd"] = cwd
+    if extra_cwd is not None:
+        payload["extra"] = {"cwd": extra_cwd}
+    p = subprocess.run(
+        ["bash", str(HOOK)],
+        input=json.dumps(payload),
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
+    out = (p.stdout or "").strip() or "{}"
+    return json.loads(out)
+
+
+def main() -> int:
+    fails = 0
+    with tempfile.TemporaryDirectory() as td:
+        dest = Path(td) / "mod"
+        leg = Path(td) / "leg"
+        dest.mkdir()
+        (dest / "src").mkdir()
+        leg.mkdir()
+        roots = [str(dest), str(leg)]
+        cwd = str(dest)
+
+        def expect_allow(cmd: str, name: str, **kw) -> None:
+            nonlocal fails
+            r = run(cmd, roots, **kw)
+            if r.get("action") == "block":
+                print("FAIL", name, r, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok", name)
+
+        def expect_block(cmd: str, name: str, needle: str, **kw) -> None:
+            nonlocal fails
+            r = run(cmd, roots, **kw)
+            msg = r.get("message") or ""
+            if r.get("action") != "block" or needle not in msg:
+                print("FAIL", name, r, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok", name)
+
+        # V16-10 (v16): the > of a quoted sed replacement is text, and the
+        # sed script, awk program and grep pattern are expressions, not paths
+        expect_allow("cd %s && grep -n 'quarkus.profile' src/main/resources/application.properties | sed 's/=.*/=<set>/'" % dest,
+                     "v16_10_sed_expression_not_a_path", cwd=cwd)
+        expect_allow("grep -rn '/api/owners/' src | awk -F: '/Controller/ {print $1}'", "v16_10_grep_awk_expressions_not_paths", cwd=cwd)
+        expect_block("cat /etc/passwd", "v16_10_real_path_still_refused", "outside allow root", cwd=cwd)
+        expect_block("sed 's/=.*/=<set>/' /etc/hosts", "v16_10_sed_file_outside_root_refused", "/etc/hosts", cwd=cwd)
+        expect_block("grep -n /etc/passwd /etc/passwd", "v16_10_grep_file_spelled_like_pattern_refused", "/etc/passwd", cwd=cwd)
+        expect_block("awk -f /etc/prog.awk src/a.txt", "v16_10_awk_program_file_refused", "/etc/prog.awk", cwd=cwd)
+        expect_block("echo '<set>' > /etc/k2probe", "v16_10_unquoted_redirect_refused", "/etc/k2probe", cwd=cwd)
+
+        # V17-1 (v17 M2 t_e4751e37): a path followed directly by a shell
+        # separator (`--root /x; echo`) kept the ; and resolved outside the root
+        expect_allow("python3 .hermes/skills/planning/admit-migration-plan/scripts/assert-planner-activated.py --root %s; echo \"EXIT=$?\"" % dest,
+                     "v17_1_path_then_semicolon_allowed", cwd=cwd)
+        expect_allow("ls %s&& echo ok" % dest, "v17_1_path_then_and_allowed", cwd=cwd)
+        expect_block("cat /etc/passwd; echo x", "v17_1_outside_path_then_semicolon_refused", "/etc/passwd", cwd=cwd)
+
+        expect_allow("export JAVA_HOME=/usr/lib/jvm/java-21-openjdk", "java_home")
+        expect_allow("export PATH=/bin:$PATH", "path_concat")
+        expect_allow("export PATH=/bin:$PATH; ls", "pathless_ls_cwd", cwd=cwd)
+        expect_block("export PATH=/bin:$PATH; ls", "pathless_ls_no_cwd", "unproven")
+        expect_block("cat /etc/passwd", "etc_passwd", "outside allow root")
+        # v32 (message text only): the refusal names this card's scratch directory, inside the allow root
+        scratch_env = {"HERMES_KANBAN_TASK": "t_scr0001", "HERMES_WRITE_SAFE_ROOT": str(dest)}
+        expect_block("echo x > /tmp/out.json", "outside_root_names_card_scratch",
+                     "use this card scratch directory %s/.derived/scratch/t_scr0001/" % os.path.realpath(str(dest)),
+                     cwd=cwd, extra_env=scratch_env)
+        expect_block("echo x > /tmp/out.json", "outside_root_names_scratch_without_task",
+                     "%s/.derived/scratch/<task>/" % os.path.realpath(str(dest)), cwd=cwd)
+        for needle in ("execute_code is pathless-or-mutation; deny", "read_file", "verification/loop/brief-<cluster>.txt",
+                       "verification/loop/context-<cluster>.txt", "--section <key> (repeatable)", "--spill <file> --field <path>"):
+            expect_block("", "execute_code_names_reads_" + needle.split()[0].strip("-<>/"), needle, cwd=cwd,
+                         tool="execute_code", extra_input={"code": "print(1)"})
+        expect_block("", "delegate_task_message_unchanged", "delegate_task is pathless-or-mutation; deny", cwd=cwd,
+                     tool="delegate_task")
+        expect_allow(f"ls {dest}", "inside_root")
+        expect_block(
+            "export JAVA_HOME=/usr/lib/jvm/x && cat /etc/passwd",
+            "export_then_etc",
+            "outside allow root",
+        )
+        expect_allow("mvn -q verify", "mvn_cwd", cwd=cwd)
+        expect_allow("java -version", "java_cwd", cwd=cwd)
+        expect_allow("git status", "git_cwd", cwd=cwd)
+        # B8 (v12 t_b33f25fa): a worker reset the run activation with git checkout
+        wk = {"HERMES_PROFILE": "implementer", "K2_BOUND_GATE_EXIT": "0"}
+        for i, c in enumerate(("git checkout -- .hermes/pins.json", "git -C /tmp/x restore src/Owner.java",
+                               "git stash", "git reset --hard HEAD", "git clean -fdx", "cd . && git add -A",
+                               "git --no-pager commit -m x")):
+            expect_block(c, "b8_git_mutation_%d" % i, "refused", cwd=cwd, extra_env=wk)
+        for i, c in enumerate(("git status", "git diff .hermes/pins.json", "git log --oneline -3", "git show HEAD:pom.xml",
+                               "git diff --stat")):
+            expect_allow(c, "b8_git_read_%d" % i, cwd=cwd, extra_env=wk)
+        expect_allow("git checkout -- .hermes/pins.json", "b8_git_no_profile_is_not_a_worker", cwd=cwd)
+        # R3: the run-control mount and the write-once binding state are outside
+        # the worker's write sandbox; a direct worker write to either is refused
+        for i, c in enumerate(("echo {} > /projects/.platform/run-control-state/binding.json",
+                               "rm -f /projects/.platform/run-control-state/binding.json",
+                               "cp /tmp/x.json /etc/rhoai3/run-control/contract.json",
+                               "tee /projects/.platform/run-control-state/requests.log < /dev/null")):
+            expect_block(c, "r3_control_write_%d" % i, "", cwd=cwd, extra_env=wk)
+        expect_allow(
+            "export JAVA_HOME=/usr/lib/jvm/java-21-openjdk; java -version",
+            "export_then_java_cwd",
+            cwd=cwd,
+        )
+        expect_allow("mvn -q verify", "mvn_extra_cwd", extra_cwd=cwd)
+        expect_block("mvn -q verify", "mvn_no_cwd", "unproven")
+
+        if len(DEST3_OPAQUE) != 15:
+            print("FAIL dest3 corpus size", len(DEST3_OPAQUE), file=sys.stderr)
+            fails += 1
+        for i, cmd in enumerate(DEST3_OPAQUE, 1):
+            expect_block(cmd, f"dest3_{i}", "opaque", cwd=cwd)
+
+        expect_block(
+            f"ls {dest} && ls $(echo L2V0Yy9wYXNzd2Q= | base64 -d)",
+            "bypass_prefix_base64",
+            "opaque",
+            cwd=cwd,
+        )
+        expect_block(
+            f"ls {dest} && ls $(xxd -r -p <<< 2f657463)",
+            "bypass_prefix_xxd",
+            "opaque",
+            cwd=cwd,
+        )
+
+        expect_allow("cat /dev/null", "dev_null", cwd=cwd)
+        expect_allow("ls /usr/lib/jvm", "jdk_list", cwd=cwd)
+        r = run(
+            "ls",
+            roots,
+            cwd=cwd,
+            extra_env={"HERMES_PROFILE": "orchestrator"},
+        )
+        if r.get("action") != "block" or "terminal disabled for profile orchestrator" not in (
+            r.get("message") or ""
+        ):
+            print("FAIL orch_terminal", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok orch_terminal")
+        r = run(
+            "hermes kanban complete t_x",
+            roots,
+            cwd=cwd,
+            extra_env={"K2_BOUND_GATE_EXIT": "1", "K2_BOUND_GATE_NAME": "check-external-dirs"},
+        )
+        msg = r.get("message") or ""
+        if r.get("action") != "block" or "check-external-dirs" not in msg or "kanban_block" not in msg:
+            print("FAIL complete_red_gate", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok complete_red_gate")
+        home = Path(td) / "hermes-home"
+        (home / "kanban" / "logs").mkdir(parents=True)
+        (home / "kanban" / "logs" / "t_m4.log").write_text(
+            "python3 .hermes/skills/gates/check-domain-parity/scripts/"
+            "check-product-tests.py /projects/modernized  0.1s [exit 1]\n"
+            "OK: assert-retrievable-tree (src/ and pom.xml committed)\n",
+            encoding="utf-8",
+        )
+        r = run(
+            "hermes kanban complete t_m4",
+            roots,
+            cwd=cwd,
+            extra_env={
+                "HERMES_HOME": str(home),
+                "HERMES_KANBAN_TASK": "t_m4",
+            },
+        )
+        msg = r.get("message") or ""
+        if (
+            r.get("action") != "block"
+            or "check-product-tests" not in msg
+            or "kanban_block" not in msg
+        ):
+            print("FAIL complete_ar28_not_cleared_by_later_ok", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok complete_ar28_not_cleared_by_later_ok")
+        r = run(
+            "mvn -q quarkus:add-extension -Dextensions=quarkus-smallrye-health",
+            roots,
+            cwd=cwd,
+            extra_env={
+                "K2_FILES_WRITABLE": "src/test/java/com/demo/HealthTest.java",
+                "HERMES_WRITE_SAFE_ROOT": str(dest),
+                "K2_STORY_ID": "polish",
+            },
+        )
+        msg = r.get("message") or ""
+        if r.get("action") != "block" or "pom.xml" not in msg or "files_writable" not in msg:
+            print("FAIL writeset_pom", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok writeset_pom")
+        r = run(
+            "mkdir -p .mvn",
+            roots,
+            cwd=cwd,
+            extra_env={
+                "K2_FILES_WRITABLE": "pom.xml",
+                "HERMES_WRITE_SAFE_ROOT": str(dest),
+                "K2_STORY_ID": "T001",
+            },
+        )
+        msg = r.get("message") or ""
+        if r.get("action") != "block" or ".mvn" not in msg or "files_writable" not in msg:
+            print("FAIL mkdir_writeset_dot_mvn", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok mkdir_writeset_dot_mvn")
+        r = run(
+            "mkdir -p " + str(dest / ".mvn"),
+            roots,
+            cwd=cwd,
+            extra_env={
+                "K2_FILES_WRITABLE": "pom.xml",
+                "HERMES_WRITE_SAFE_ROOT": str(dest),
+                "K2_STORY_ID": "T001",
+            },
+        )
+        msg = r.get("message") or ""
+        if r.get("action") != "block" or ".mvn" not in msg:
+            print("FAIL mkdir_writeset_abs_mvn", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok mkdir_writeset_abs_mvn")
+        r = run(
+            "mkdir -p src",
+            roots,
+            cwd=cwd,
+            extra_env={
+                "K2_FILES_WRITABLE": "src/In.java",
+                "HERMES_WRITE_SAFE_ROOT": str(dest),
+                "K2_STORY_ID": "US1",
+            },
+        )
+        if r.get("action") == "block":
+            print("FAIL mkdir_parent_of_writable", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok mkdir_parent_of_writable")
+        r = run(
+            "ls /greeting",
+            roots,
+            cwd=cwd,
+            extra_env={"HERMES_WRITE_SAFE_ROOT": str(dest)},
+        )
+        msg = r.get("message") or ""
+        if r.get("action") == "block" and "outside allow root" in msg:
+            print("FAIL http_route_not_fs_path", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok http_route_not_fs_path")
+        r = run(
+            "",
+            roots,
+            cwd=cwd,
+            tool="write_file",
+            extra_input={"path": str(dest / "src" / "Out.java")},
+            extra_env={
+                "K2_FILES_WRITABLE": "src/In.java",
+                "HERMES_WRITE_SAFE_ROOT": str(dest),
+                "K2_STORY_ID": "US1",
+            },
+        )
+        msg = r.get("message") or ""
+        if r.get("action") != "block" or "Out.java" not in msg:
+            print("FAIL writeset_file", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok writeset_file")
+        hook_src = HOOK.read_text(encoding="utf-8")
+        fn_start = hook_src.find("def looks_like_write_cmd")
+        fn_end = hook_src.find("def in_dest_write_sandbox")
+        write_fn = hook_src[fn_start:fn_end] if fn_start >= 0 and fn_end > fn_start else ""
+        if "python" in write_fn.lower():
+            print(
+                "FAIL looks_like_write_cmd_lists_python",
+                file=sys.stderr,
+            )
+            fails += 1
+        else:
+            print("ok looks_like_write_cmd_not_interpreter_list")
+        if "def write_effect_paths" not in hook_src:
+            print("FAIL missing write_effect_paths", file=sys.stderr)
+            fails += 1
+        else:
+            print("ok write_effect_paths_present")
+        if "advisory" not in hook_src.lower() or "not containment" not in hook_src.lower():
+            print("FAIL write_effect_residual_limit_undocumented", file=sys.stderr)
+            fails += 1
+        else:
+            print("ok write_effect_residual_limit_documented")
+        py_open_out = (
+            "python3 -c "
+            "\"open('evidence/bodies/m3-setup.json', 'w').write('{}')\""
+        )
+        r = run(
+            py_open_out,
+            roots,
+            cwd=cwd,
+            extra_env={
+                "K2_FILES_WRITABLE": "pom.xml",
+                "HERMES_WRITE_SAFE_ROOT": str(dest),
+                "K2_STORY_ID": "setup",
+            },
+        )
+        msg = r.get("message") or ""
+        if r.get("action") != "block" or "m3-setup.json" not in msg:
+            print("FAIL writeset_python_open_w", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok writeset_python_open_w")
+        r = run(
+            "python3 -c \"open('src/In.java', 'w').write('class In {}')\"",
+            roots,
+            cwd=cwd,
+            extra_env={
+                "K2_FILES_WRITABLE": "src/In.java",
+                "HERMES_WRITE_SAFE_ROOT": str(dest),
+                "K2_STORY_ID": "US1",
+            },
+        )
+        if r.get("action") == "block":
+            print("FAIL writeset_python_open_w_allowed", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok writeset_python_open_w_allowed")
+        r = run(
+            "python3 -c \"open('src/Out.java', 'r')\"",
+            roots,
+            cwd=cwd,
+            extra_env={
+                "K2_FILES_WRITABLE": "src/In.java",
+                "HERMES_WRITE_SAFE_ROOT": str(dest),
+                "K2_STORY_ID": "US1",
+            },
+        )
+        if r.get("action") == "block":
+            print("FAIL writeset_python_open_r_not_a_write", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok writeset_python_open_r_not_a_write")
+        r = run(
+            "python3 -c \"from pathlib import Path; "
+            "Path('evidence/bodies/m3-setup.json').write_text('{}')\"",
+            roots,
+            cwd=cwd,
+            extra_env={
+                "K2_FILES_WRITABLE": "pom.xml",
+                "HERMES_WRITE_SAFE_ROOT": str(dest),
+                "K2_STORY_ID": "setup",
+            },
+        )
+        msg = r.get("message") or ""
+        if r.get("action") != "block" or "m3-setup.json" not in msg:
+            print("FAIL writeset_path_write_text", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok writeset_path_write_text")
+        r = run(
+            "mvn -q quarkus:add-extension -Dextensions=quarkus-smallrye-health",
+            roots,
+            cwd=cwd,
+            extra_env={
+                "K2_CARD_PHASE": "M4",
+                "HERMES_WRITE_SAFE_ROOT": str(dest),
+                "K2_STORY_ID": "verdict",
+            },
+        )
+        msg = r.get("message") or ""
+        if r.get("action") != "block" or "must not implement" not in msg:
+            print("FAIL m4_add_extension", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok m4_add_extension")
+        r = run(
+            "",
+            roots,
+            cwd=cwd,
+            tool="write_file",
+            extra_input={"path": str(dest / "pom.xml")},
+            extra_env={
+                "K2_CARD_PHASE": "M4",
+                "HERMES_WRITE_SAFE_ROOT": str(dest),
+                "K2_STORY_ID": "verdict",
+            },
+        )
+        msg = r.get("message") or ""
+        if r.get("action") != "block" or "pom.xml" not in msg:
+            print("FAIL m4_write_pom", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok m4_write_pom")
+        r = run(
+            "",
+            roots,
+            cwd=cwd,
+            tool="write_file",
+            extra_input={"path": str(dest / "evidence" / "verdicts" / "x.json")},
+            extra_env={
+                "K2_CARD_PHASE": "M4",
+                "HERMES_WRITE_SAFE_ROOT": str(dest),
+                "K2_STORY_ID": "verdict",
+            },
+        )
+        if r.get("action") == "block":
+            print("FAIL m4_write_verdict", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok m4_write_verdict")
+        r = run(
+            "",
+            roots,
+            cwd=cwd,
+            tool="write_file",
+            extra_input={
+                "path": str(dest / "evidence" / "receipts" / "gates" / "check-domain-parity.json")
+            },
+            extra_env={
+                "K2_CARD_PHASE": "M4",
+                "HERMES_WRITE_SAFE_ROOT": str(dest),
+                "K2_STORY_ID": "verdict",
+            },
+        )
+        msg = r.get("message") or ""
+        if r.get("action") != "block" or "gate receipts" not in msg:
+            print("FAIL m4_write_gate_receipt", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok m4_write_gate_receipt")
+        expect_block(
+            "cat /etc/passwd > /dev/null",
+            "passwd_to_null",
+            "outside allow root",
+            cwd=cwd,
+        )
+        expect_allow(
+            "ls",
+            "impl_terminal",
+            cwd=cwd,
+            extra_env={"HERMES_PROFILE": "implementer"},
+        )
+        r = run(
+            "hermes kanban complete t_x",
+            roots,
+            cwd=cwd,
+            extra_env={
+                "HERMES_PROFILE": "implementer",
+                "K2_BOUND_GATE_EXIT": "0",
+            },
+        )
+        msg = r.get("message") or ""
+        if (
+            r.get("action") != "block"
+            or "kanban_request_review" not in msg
+        ):
+            print("FAIL impl_complete_uses_request_review", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok impl_complete_uses_request_review")
+        r = run(
+            "",
+            roots,
+            cwd=cwd,
+            tool="kanban_complete",
+            extra_env={
+                "HERMES_PROFILE": "implementer",
+                "K2_BOUND_GATE_EXIT": "0",
+            },
+        )
+        msg = r.get("message") or ""
+        if (
+            r.get("action") != "block"
+            or "kanban_request_review" not in msg
+        ):
+            print("FAIL impl_native_complete_uses_request_review", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok impl_native_complete_uses_request_review")
+        # B8: an accepted card whose continuation did not reach a minted
+        # successor cannot complete; it blocks, and may block
+        cont = dest / "verification" / "loop" / "continuation.json"
+        cont.parent.mkdir(parents=True, exist_ok=True)
+        steps_p = dest / "verification" / "loop" / "steps.json"
+        steps_p.write_text(json.dumps({"steps": [{"card": "t_cont", "verdict": "accepted", "commit": "abc"}]}), encoding="utf-8")
+        cenv = {"HERMES_PROFILE": "implementer", "K2_BOUND_GATE_EXIT": "0", "HERMES_KANBAN_TASK": "t_cont"}
+        for state in ("admission-refused", "no-successor", "mint-failed"):
+            cont.write_text(json.dumps({"predecessor": "t_cont", "state": state,
+                                        "reasons": ["RUN_ACTIVATION_MISSING: run v13 was bound at T"]}), encoding="utf-8")
+            r = run("", roots, cwd=cwd, tool="kanban_complete", extra_env=cenv)
+            if r.get("action") != "block" or "no successor" not in (r.get("message") or "") or "RUN_ACTIVATION_MISSING" not in (r.get("message") or ""):
+                print("FAIL b8_complete_refused_%s" % state, r, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok b8_complete_refused_%s" % state)
+            r = run("", roots, cwd=cwd, tool="kanban_block", extra_env=cenv)
+            if r.get("action") == "block" and "acceptance of this card is recorded" in (r.get("message") or ""):
+                print("FAIL b8_block_allowed_%s" % state, r, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok b8_block_allowed_%s" % state)
+        cont.write_text(json.dumps({"predecessor": "t_other", "state": "admission-refused", "reasons": ["x"]}), encoding="utf-8")
+        r = run("", roots, cwd=cwd, tool="kanban_complete", extra_env=cenv)
+        if "no successor" in (r.get("message") or ""):
+            print("FAIL b8_other_predecessor_ignored", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok b8_other_predecessor_ignored")
+        cont.unlink()
+        steps_p.unlink()
+        crumb = dest / "evidence" / "receipts" / "hook" / "complete-invocations.jsonl"
+        if not crumb.is_file():
+            print("FAIL complete_breadcrumb_written missing", file=sys.stderr)
+            fails += 1
+        else:
+            rows = []
+            for line in crumb.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    rows.append(json.loads(line))
+            if not any(
+                r.get("decision") == "refuse_implementer"
+                and r.get("tool") == "kanban_complete"
+                for r in rows
+            ):
+                print("FAIL complete_breadcrumb_refuse_implementer", rows, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok complete_breadcrumb_written")
+        r = run(
+            "ls",
+            roots,
+            cwd=cwd,
+            extra_env={"HERMES_PROFILE": "reviewer"},
+        )
+        if r.get("action") == "block":
+            print("FAIL reviewer_terminal", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok reviewer_terminal")
+        r = run(
+            "",
+            roots,
+            cwd=cwd,
+            tool="write_file",
+            extra_input={"path": str(dest / "src" / "x.java")},
+            extra_env={"HERMES_PROFILE": "reviewer"},
+        )
+        msg = r.get("message") or ""
+        if r.get("action") != "block" or "reviewer" not in msg:
+            print("FAIL reviewer_file", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok reviewer_file")
+        r = run(
+            "hermes kanban complete t_x",
+            roots,
+            cwd=cwd,
+            extra_env={"HERMES_PROFILE": "reviewer"},
+        )
+        msg = r.get("message") or ""
+        if (
+            r.get("action") != "block"
+            or "paved-road audit" not in msg
+        ):
+            print("FAIL reviewer_complete_without_audit", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok reviewer_complete_without_audit")
+        r = run(
+            "hermes kanban complete t_x",
+            roots,
+            cwd=cwd,
+            extra_env={
+                "HERMES_PROFILE": "reviewer",
+                "K2_PAVED_ROAD_AUDIT_EXIT": "0",
+            },
+        )
+        if r.get("action") == "block":
+            print("FAIL reviewer_complete_after_audit", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok reviewer_complete_after_audit")
+        # loop card: the transaction verdict is the audit; REVERTED is a complete, recorded outcome
+        for verdict in ("ACCEPTED", "REVERTED", "DEFERRED"):
+            r = run(
+                "hermes kanban complete t_x",
+                roots,
+                cwd=cwd,
+                extra_env={"HERMES_PROFILE": "reviewer", "K2_LOOP_VERDICT": verdict, "K2_BOUND_GATE_EXIT": "1", "K2_BOUND_GATE_NAME": "fix-until-green/scripts/advance"},
+            )
+            if r.get("action") == "block":
+                print("FAIL reviewer_complete_loop_%s" % verdict.lower(), r, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok reviewer_complete_loop_%s" % verdict.lower())
+        # Architect 183220ZA: hermes -p reviewer sets HERMES_HOME to
+        # <root>/profiles/reviewer; the official log stays under
+        # <root>/kanban/logs/. A missing log after that resolve is still
+        # a refusal (do not treat absence as pass).
+        profile_root = Path(td) / "hermes-root-profile"
+        (profile_root / "kanban" / "logs").mkdir(parents=True)
+        profile_home = profile_root / "profiles" / "reviewer"
+        profile_home.mkdir(parents=True)
+        audit_ok = (
+            "  ┊ 💻 $         python3 /projects/modernized/.hermes/skills/"
+            "paved-road/paved-road-m1/scripts/assert-paved-road-audit.py "
+            "--log /projects/modernized/.hermes/home/kanban/logs/t_ok.log "
+            "--root /projects/modernized  0.2s\n"
+        )
+        (profile_root / "kanban" / "logs" / "t_ok.log").write_text(
+            audit_ok, encoding="utf-8"
+        )
+
+        def audit_receipt(logs, task, rc, profile="reviewer", run_id="", state="done"):
+            # what paved_road.write_audit_receipt writes beside the official
+            # log: bound to the log and execution-ledger bytes it graded
+            import hashlib
+            ledger = logs / ("%s.exec.jsonl" % task)
+            if not ledger.exists():
+                ledger.write_text('{"command": "audit", "exit_code": 0}\n', encoding="utf-8")
+            bound = {}
+            for name, path in (("log", logs / ("%s.log" % task)), ("ledger", ledger)):
+                data = path.read_bytes()
+                bound[name] = {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+            (logs / ("%s.audit.json" % task)).write_text(json.dumps(dict(
+                {"schema": "rhoai3.paved-road-audit-receipt/v2", "task": task, "rc": rc, "state": state,
+                 "run": run_id, "profile": profile}, **bound)), encoding="utf-8")
+
+        audit_receipt(profile_root / "kanban" / "logs", "t_ok", 0)
+        r = run(
+            "hermes kanban complete t_ok",
+            roots,
+            cwd=cwd,
+            extra_env={
+                "HERMES_PROFILE": "reviewer",
+                "HERMES_HOME": str(profile_home),
+                "HERMES_KANBAN_TASK": "t_ok",
+            },
+        )
+        if r.get("action") == "block":
+            print("FAIL reviewer_complete_profile_home_audit_ok", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok reviewer_complete_profile_home_audit_ok")
+        # after a green audit the reviewer may only terminate: exploration is refused
+        green_env = {"HERMES_PROFILE": "reviewer", "HERMES_HOME": str(profile_home), "HERMES_KANBAN_TASK": "t_ok", "K2_BOUND_GATE_EXIT": "0"}
+        for cmdline, tl in (("find /projects/modernized -name t_ok.log", "terminal"), ("python3 -c \"import json; print(1)\"", "terminal"), ("", "kanban_attach")):
+            r = run(cmdline, roots, cwd=cwd, tool=tl, extra_env=green_env)
+            if r.get("action") != "block" or "already exited 0" not in (r.get("message") or ""):
+                print("FAIL reviewer_after_green_refuses %r" % (cmdline or tl), r, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok reviewer_after_green_refuses")
+        for cmdline, tl in (("python3 /projects/modernized/.hermes/skills/paved-road/paved-road-m1/scripts/assert-paved-road-audit.py --root .", "terminal"), ("", "kanban_request_changes"), ("", "kanban_complete")):
+            r = run(cmdline, roots, cwd=cwd, tool=tl, extra_env=green_env)
+            if r.get("action") == "block" and "already exited 0" in (r.get("message") or ""):
+                print("FAIL reviewer_after_green_allows %r" % (cmdline or tl), r, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok reviewer_after_green_allows")
+        r = run("find . -name x", roots, cwd=cwd, tool="terminal", extra_env={"HERMES_PROFILE": "reviewer", "HERMES_HOME": str(profile_home), "HERMES_KANBAN_TASK": "t_red", "K2_BOUND_GATE_EXIT": "0"})
+        if r.get("action") == "block" and "already exited 0" in (r.get("message") or ""):
+            print("FAIL reviewer_before_green_allows", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok reviewer_before_green_allows")
+        audit_red = (
+            "  ┊ 💻 $         python3 /projects/modernized/.hermes/skills/"
+            "paved-road/paved-road-m1/scripts/assert-paved-road-audit.py "
+            "--log /projects/modernized/.hermes/home/kanban/logs/t_red.log "
+            "--root /projects/modernized  0.2s [exit 1]\n"
+        )
+        (profile_root / "kanban" / "logs" / "t_red.log").write_text(
+            audit_red, encoding="utf-8"
+        )
+        audit_receipt(profile_root / "kanban" / "logs", "t_red", 1)
+        r = run(
+            "hermes kanban complete t_red",
+            roots,
+            cwd=cwd,
+            extra_env={
+                "HERMES_PROFILE": "reviewer",
+                "HERMES_HOME": str(profile_home),
+                "HERMES_KANBAN_TASK": "t_red",
+            },
+        )
+        msg = r.get("message") or ""
+        if r.get("action") != "block" or "paved-road audit" not in msg:
+            print("FAIL reviewer_complete_profile_home_audit_red", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok reviewer_complete_profile_home_audit_red")
+        default_home = Path(td) / "hermes-root-default"
+        (default_home / "kanban" / "logs").mkdir(parents=True)
+        (default_home / "kanban" / "logs" / "t_def.log").write_text(
+            audit_ok.replace("t_ok.log", "t_def.log"), encoding="utf-8"
+        )
+        audit_receipt(default_home / "kanban" / "logs", "t_def", 0)
+        # V17-6 (v17 M4 t_4c09775b): an unmarked audit line is not a pass, and
+        # only the CURRENT reviewer run's own audit latches the fence.
+        v17_logs = profile_root / "kanban" / "logs"
+        (v17_logs / "t_v17.log").write_text(audit_ok.replace("t_ok.log", "t_v17.log"), encoding="utf-8")
+        v17_env = {"HERMES_PROFILE": "reviewer", "HERMES_HOME": str(profile_home), "HERMES_KANBAN_TASK": "t_v17",
+                   "HERMES_KANBAN_RUN_ID": "32", "K2_BOUND_GATE_EXIT": "0"}
+        for label, receipt in (("no_receipt_unmarked_line", None),
+                               ("implementer_self_audit", ("implementer", "28", 0)),
+                               ("earlier_reviewer_run", ("reviewer", "30", 0)),
+                               ("current_run_red", ("reviewer", "32", 1))):
+            rp = v17_logs / "t_v17.audit.json"
+            if rp.exists():
+                rp.unlink()
+            if receipt:
+                audit_receipt(v17_logs, "t_v17", receipt[2], profile=receipt[0], run_id=receipt[1])
+            r = run("echo test", roots, cwd=cwd, tool="terminal", extra_env=v17_env)
+            r2 = run("hermes kanban complete t_v17", roots, cwd=cwd, extra_env=v17_env)
+            if (r.get("action") == "block" and "already exited 0" in (r.get("message") or "")) or r2.get("action") != "block":
+                print("FAIL v17_6_%s (fence must stay open, complete refused)" % label, r, r2, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok v17_6_%s" % label)
+        # an interrupted audit (state running) and a log rewritten after the
+        # audit are not green either
+        audit_receipt(v17_logs, "t_v17", None, profile="reviewer", run_id="32", state="running")
+        r2 = run("hermes kanban complete t_v17", roots, cwd=cwd, extra_env=v17_env)
+        print(("FAIL" if r2.get("action") != "block" else "ok") + " v17_6_interrupted_audit_not_green")
+        fails += r2.get("action") != "block"
+        audit_receipt(v17_logs, "t_v17", 0, profile="reviewer", run_id="32")
+        original = (v17_logs / "t_v17.log").read_text(encoding="utf-8")
+        (v17_logs / "t_v17.log").write_text(original.replace("0.2s", "0.3s"), encoding="utf-8")
+        r2 = run("hermes kanban complete t_v17", roots, cwd=cwd, extra_env=v17_env)
+        print(("FAIL" if r2.get("action") != "block" else "ok") + " v17_6_rewritten_log_not_green")
+        fails += r2.get("action") != "block"
+        (v17_logs / "t_v17.log").write_text(original + "  appended after the audit\n", encoding="utf-8")
+        r = run("echo test", roots, cwd=cwd, tool="terminal", extra_env=v17_env)
+        r2 = run("hermes kanban complete t_v17", roots, cwd=cwd, extra_env=v17_env)
+        if r.get("action") != "block" or "already exited 0" not in (r.get("message") or "") or r2.get("action") == "block":
+            print("FAIL v17_6_current_reviewer_green (fence latches, complete allowed)", r, r2, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok v17_6_current_reviewer_green")
+        r = run(
+            "hermes kanban complete t_def",
+            roots,
+            cwd=cwd,
+            extra_env={
+                "HERMES_PROFILE": "reviewer",
+                "HERMES_HOME": str(default_home),
+                "HERMES_KANBAN_TASK": "t_def",
+            },
+        )
+        if r.get("action") == "block":
+            print("FAIL reviewer_complete_base_home_audit_ok", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok reviewer_complete_base_home_audit_ok")
+        r = run(
+            "hermes kanban complete t_missing",
+            roots,
+            cwd=cwd,
+            extra_env={
+                "HERMES_PROFILE": "reviewer",
+                "HERMES_HOME": str(profile_home),
+                "HERMES_KANBAN_TASK": "t_missing",
+            },
+        )
+        msg = r.get("message") or ""
+        if r.get("action") != "block" or "paved-road audit" not in msg:
+            print("FAIL reviewer_complete_profile_home_log_absent", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok reviewer_complete_profile_home_log_absent")
+        (profile_root / "kanban" / "logs" / "t_bg.log").write_text(
+            "python3 .hermes/skills/gates/check-domain-parity/scripts/"
+            "check-product-tests.py /projects/modernized  0.1s [exit 1]\n",
+            encoding="utf-8",
+        )
+        r = run(
+            "hermes kanban complete t_bg",
+            roots,
+            cwd=cwd,
+            extra_env={
+                "HERMES_HOME": str(profile_home),
+                "HERMES_KANBAN_TASK": "t_bg",
+            },
+        )
+        msg = r.get("message") or ""
+        if (
+            r.get("action") != "block"
+            or "check-product-tests" not in msg
+            or "kanban_block" not in msg
+        ):
+            print("FAIL complete_bound_gate_profile_home", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok complete_bound_gate_profile_home")
+        rows = []
+        if crumb.is_file():
+            for line in crumb.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    rows.append(json.loads(line))
+        if not any(r.get("decision") == "allow" for r in rows):
+            print("FAIL complete_breadcrumb_allow", rows, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok complete_breadcrumb_allow")
+        r = run(
+            "",
+            roots,
+            cwd=cwd,
+            tool="kanban_complete",
+            extra_env={"HERMES_PROFILE": "reviewer"},
+        )
+        msg = r.get("message") or ""
+        if (
+            r.get("action") != "block"
+            or "paved-road audit" not in msg
+        ):
+            print("FAIL reviewer_native_complete_without_audit", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok reviewer_native_complete_without_audit")
+        expect_allow(
+            "hermes kanban complete t_x",
+            "complete_green_gate",
+            cwd=cwd,
+            extra_env={"K2_BOUND_GATE_EXIT": "0"},
+        )
+        home = dest / "hermes-home"
+        (home / "kanban" / "logs").mkdir(parents=True)
+        (home / "kanban" / "logs" / "t_live.log").write_text(
+            "python3 admit-migration-plan.py --root . [exit 1]\n",
+            encoding="utf-8",
+        )
+        r = run(
+            "",
+            roots,
+            cwd=cwd,
+            tool="kanban_complete",
+            extra_payload={"task_id": "t_live"},
+            extra_env={
+                "HERMES_HOME": str(home),
+                "HERMES_KANBAN_TASK": "",
+                "HERMES_PROFILE": "",
+            },
+        )
+        msg = r.get("message") or ""
+        if (
+            r.get("action") != "block"
+            or "admit-migration-plan" not in msg
+        ):
+            print("FAIL native_complete_payload_task_id_bound_gate", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok native_complete_payload_task_id_bound_gate")
+        r = run(
+            "",
+            roots,
+            cwd=cwd,
+            tool="write_file",
+            extra_input={"path": str(dest / "src" / "In.java")},
+            extra_env={
+                "K2_FILES_WRITABLE": "src/In.java",
+                "HERMES_WRITE_SAFE_ROOT": str(dest),
+                "K2_STORY_ID": "US1",
+            },
+        )
+        if r.get("action") == "block":
+            print("FAIL writeset_inside", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok writeset_inside")
+        r = run(
+            "",
+            roots,
+            cwd=cwd,
+            tool="write_file",
+            extra_input={"path": "src/Out.java"},
+            extra_env={
+                "K2_FILES_WRITABLE": "src/In.java",
+                "HERMES_WRITE_SAFE_ROOT": str(dest),
+                "K2_STORY_ID": "US1",
+            },
+        )
+        msg = r.get("message") or ""
+        if r.get("action") != "block" or "Out.java" not in msg:
+            print("FAIL writeset_relative", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok writeset_relative")
+        r = run(
+            "",
+            roots,
+            cwd=cwd,
+            tool="write_file",
+            extra_input={"path": str(leg / "x.java")},
+            extra_env={"HERMES_WRITE_SAFE_ROOT": str(dest)},
+        )
+        msg = r.get("message") or ""
+        if r.get("action") != "block" or "write sandbox" not in msg:
+            print("FAIL legacy_write_sandbox", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok legacy_write_sandbox")
+        body = dest / "card.json"
+        body.write_text(
+            json.dumps({"files_writable": ["src/In.java"], "identity": {"story_id": "US1"}}),
+            encoding="utf-8",
+        )
+        r = run(
+            "",
+            roots,
+            cwd=cwd,
+            tool="write_file",
+            extra_input={"path": str(dest / "src" / "Out.java")},
+            extra_env={
+                "K2_CARD_BODY": str(body),
+                "HERMES_WRITE_SAFE_ROOT": str(dest),
+                "K2_STORY_ID": "US1",
+            },
+        )
+        msg = r.get("message") or ""
+        if r.get("action") != "block" or "Out.java" not in msg:
+            print("FAIL writeset_card_body", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok writeset_card_body")
+        import sqlite3
+
+        db = Path(td) / "kanban.db"
+        con = sqlite3.connect(db)
+        con.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY, description TEXT)")
+        con.execute(
+            "INSERT INTO tasks VALUES (?, ?)",
+            (
+                "t_story",
+                json.dumps({"files_writable": ["src/In.java"]}),
+            ),
+        )
+        con.commit()
+        con.close()
+        r = run(
+            "",
+            roots,
+            cwd=cwd,
+            tool="write_file",
+            extra_input={"path": str(dest / "src" / "Out.java")},
+            extra_env={
+                "HERMES_KANBAN_TASK": "t_story",
+                "HERMES_KANBAN_DB": str(db),
+                "HERMES_WRITE_SAFE_ROOT": str(dest),
+                "K2_STORY_ID": "US1",
+            },
+        )
+        msg = r.get("message") or ""
+        if r.get("action") != "block" or "Out.java" not in msg:
+            print("FAIL writeset_sqlite", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok writeset_sqlite")
+        red_home = Path(td) / "p0b-home"
+        (red_home / "kanban" / "logs").mkdir(parents=True)
+        (red_home / "kanban" / "logs" / "t_p0b.log").write_text(
+            "  ┊ 💻 $         python3 .hermes/skills/planning/admit-migration-plan/"
+            "scripts/verify-admission-receipt.py --root . "
+            "--any-status  0.2s [exit 1]\n",
+            encoding="utf-8",
+        )
+        p0b = {
+            "HERMES_PROFILE": "implementer",
+            "HERMES_HOME": str(red_home),
+            "HERMES_KANBAN_TASK": "t_p0b",
+            "HERMES_WRITE_SAFE_ROOT": str(dest),
+            "K2_FILES_WRITABLE": "evidence/",
+        }
+        r = run(
+            "",
+            roots,
+            cwd=cwd,
+            tool="write_file",
+            extra_input={"path": str(dest / "evidence" / "planning" / "ownership-map.json")},
+            extra_env=p0b,
+        )
+        msg = r.get("message") or ""
+        if r.get("action") != "block" or "product-tree write refused" not in msg:
+            print("FAIL p0b_write_after_exit1", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok p0b_write_after_exit1")
+        r = run(
+            "python3 .hermes/kernel/k4_mint.py --root . --exec",
+            roots,
+            cwd=cwd,
+            extra_env=p0b,
+        )
+        msg = r.get("message") or ""
+        if r.get("action") != "block" or "continue after mandated" not in msg:
+            print("FAIL p0b_k4_mint_after_exit1", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok p0b_k4_mint_after_exit1")
+        r = run(
+            "python3 .hermes/skills/planning/admit-migration-plan/scripts/"
+            "verify-admission-receipt.py --root . "
+            "--any-status",
+            roots,
+            cwd=cwd,
+            extra_env=p0b,
+        )
+        if r.get("action") == "block":
+            print("FAIL p0b_rerun_same_needle", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok p0b_rerun_same_needle")
+        r = run(
+            "hermes kanban block t_p0b",
+            roots,
+            cwd=cwd,
+            extra_env=p0b,
+        )
+        if r.get("action") == "block":
+            print("FAIL p0b_kanban_block_allowed", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok p0b_kanban_block_allowed")
+        r = run(
+            "hermes kanban request_review t_p0b",
+            roots,
+            cwd=cwd,
+            extra_env=p0b,
+        )
+        msg = r.get("message") or ""
+        if r.get("action") != "block" or "kanban_request_review refused" not in msg:
+            print("FAIL p0b_request_review_while_red", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok p0b_request_review_while_red")
+        # loop road: after a red advance the implementer may re-run run-verify.sh (then advance), not only advance
+        r = run("bash .hermes/skills/migration/fix-until-green/scripts/run-verify.sh --root .", roots, cwd=cwd,
+                extra_env={"HERMES_PROFILE": "implementer", "HERMES_KANBAN_TASK": "t_p0b", "K2_BOUND_GATE_EXIT": "1", "K2_BOUND_GATE_NAME": "fix-until-green/scripts/advance"})
+        if r.get("action") == "block":
+            print("FAIL loop_run_verify_after_red_advance", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok loop_run_verify_after_red_advance")
+        # v24 run t_e5f41dc2: after a REVERTED (advance.py exit 1 by design) a read-only probe was refused
+        # three times and the worker halted. Only the LATEST advance invocation of this card, in this
+        # native run, on the unit issued now, recorded as REVERTED lifts the advance lockout; every
+        # stale, incomplete or other-verdict receipt keeps it (architect review 2026-09-29).
+        rev_home = Path(td) / "rev-home"
+        logs = rev_home / "kanban" / "logs"
+        logs.mkdir(parents=True)
+        adv = "python3 .hermes/skills/migration/fix-until-green/scripts/advance.py --root . --cluster c:1 --card t_rev"
+        loopd = dest / "verification" / "loop"
+        loopd.mkdir(parents=True, exist_ok=True)
+        rev_env = {"HERMES_PROFILE": "implementer", "HERMES_HOME": str(rev_home), "HERMES_KANBAN_TASK": "t_rev",
+                   "HERMES_KANBAN_RUN_ID": "7", "HERMES_WRITE_SAFE_ROOT": str(dest)}
+
+        def rev_case(name, blocked, *, receipt, ledger, log_extra="", issued=None):
+            (logs / "t_rev.log").write_text("  ┊ 💻 $         %s  5.3s [exit 1]\n%s" % (adv, log_extra), encoding="utf-8")
+            (logs / "t_rev.k2-run.json").write_text(json.dumps({"run": "7", "offset": 0}), encoding="utf-8")
+            (logs / "t_rev.exec.jsonl").write_text("".join(json.dumps(r) + "\n" for r in ledger), encoding="utf-8")
+            (loopd / "issued.json").write_text(json.dumps(issued or {"task_id": "t_rev", "cluster": "c:1"}), encoding="utf-8")
+            rp = loopd / "last-advance.json"
+            if receipt is None:
+                rp.unlink(missing_ok=True)
+            else:
+                rp.write_text(json.dumps(receipt), encoding="utf-8")
+            nonlocal_fails = 0
+            for cmd in ("javap -version", "cat src/Main.java"):
+                r = run(cmd, roots, cwd=cwd, extra_env=rev_env)
+                if (r.get("action") == "block") != blocked:
+                    print("FAIL rev_%s (%s)" % (name, cmd), r, file=sys.stderr)
+                    nonlocal_fails += 1
+            if not nonlocal_fails:
+                print("ok rev_" + name)
+            return nonlocal_fails
+
+        def start(call, run_id="7"):
+            return {"phase": "start", "task": "t_rev", "run": run_id, "command": adv, "tool_call_id": call}
+
+        def end(call, code=1, run_id="7"):
+            return {"phase": "end", "task": "t_rev", "run": run_id, "command": adv, "tool_call_id": call, "exit_code": code}
+
+        def rec(verdict, call="c2", run_id="7", cluster="c:1"):
+            return {"card": "t_rev", "run": run_id, "cluster": cluster, "tool_call_id": call, "verdict": verdict}
+
+        cur = [start("c2"), end("c2")]
+        fails += rev_case("current_reverted_allows_reads", False, receipt=rec("REVERTED"), ledger=cur)
+        fails += rev_case("current_refused_blocks", True, receipt=rec("REFUSED"), ledger=cur)
+        fails += rev_case("current_deferred_blocks", True, receipt=rec("DEFERRED"), ledger=cur)
+        fails += rev_case("prior_run_reverted_blocks", True, receipt=rec("REVERTED", run_id="6"), ledger=cur)
+        fails += rev_case("previous_unit_reverted_blocks", True, receipt=rec("REVERTED", cluster="c:0"), ledger=cur)
+        # an earlier REVERTED (c1), then a newer invocation (c2) that never recorded its disposition
+        fails += rev_case("interrupted_newer_invocation_blocks", True, receipt=rec("REVERTED", call="c1"),
+                          ledger=[start("c1"), end("c1"), start("c2"), end("c2")])
+        # the final replacement failed: the IN_PROGRESS receipt of the current invocation stays
+        fails += rev_case("failed_replacement_blocks", True, receipt=rec("IN_PROGRESS"), ledger=cur)
+        fails += rev_case("missing_receipt_blocks", True, receipt=None, ledger=cur)
+        fails += rev_case("no_ledger_row_blocks", True, receipt=rec("REVERTED"), ledger=[])
+        # another bound gate is still red: the REVERTED lifts only the advance lockout
+        fails += rev_case("other_red_gate_still_blocks", True, receipt=rec("REVERTED"), ledger=cur,
+                          log_extra="  ┊ 💻 $         python3 .hermes/skills/planning/admit-migration-plan/scripts/"
+                                    "verify-admission-receipt.py --root . --any-status  0.2s [exit 1]\n")
+        (loopd / "last-advance.json").unlink(missing_ok=True)
+        (loopd / "issued.json").unlink(missing_ok=True)
+        # v24 / architect review F2: the native finalizer (runtime 0016) records what the --skills preload
+        # ACTUALLY loaded. A run whose required skill did not load may not start migration work; the hook never
+        # records requested skills as loaded.
+        pre_home = Path(td) / "pre-home"
+        (pre_home / "kanban" / "logs").mkdir(parents=True)
+        led = pre_home / "kanban" / "logs" / "t_pre.exec.jsonl"
+        pre_env = {"HERMES_PROFILE": "implementer", "HERMES_HOME": str(pre_home), "HERMES_KANBAN_TASK": "t_pre",
+                   "HERMES_KANBAN_RUN_ID": "41", "HERMES_WRITE_SAFE_ROOT": str(dest)}
+
+        def native(run_id, status, loaded, missing):
+            return {"phase": "preload", "source": "native-finalize", "task": "t_pre", "run": run_id, "status": status,
+                    "requested": ["paved-road-m3", "fix-until-green"], "missing": missing,
+                    "loaded": [{"skill": n, "skill_md": "/x/%s/SKILL.md" % n, "skill_md_sha256": "0" * 64} for n in loaded]}
+
+        def pre_case(name, rows, cmd, blocked, needle=""):
+            led.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+            r = run(cmd, roots, cwd=cwd, extra_env=pre_env)
+            ok = (r.get("action") == "block") == blocked and (not needle or needle in (r.get("message") or ""))
+            print(("ok " if ok else "FAIL ") + name, "" if ok else r, file=sys.stdout if ok else sys.stderr)
+            return 0 if ok else 1
+
+        full = native("41", "loaded", ["paved-road-m3", "fix-until-green"], [])
+        partial = native("41", "partial", ["paved-road-m3"], ["fix-until-green"])
+        fails += pre_case("preload_complete_allows_work", [full], "cat src/Main.java", False)
+        fails += pre_case("preload_partial_blocks_work", [partial], "cat src/Main.java", True, "PRELOAD_INCOMPLETE: the required skill(s) fix-until-green")
+        fails += pre_case("preload_timeout_blocks_work", [native("41", "timeout", [], ["paved-road-m3", "fix-until-green"])],
+                          "cat src/Main.java", True, "PRELOAD_INCOMPLETE")
+        fails += pre_case("preload_partial_allows_kanban_block", [partial], "hermes kanban block t_pre", False)
+        fails += pre_case("preload_partial_of_another_run_does_not_block", [native("40", "partial", ["paved-road-m3"], ["fix-until-green"])],
+                          "cat src/Main.java", False)
+        fails += pre_case("preload_unrecorded_does_not_block", [], "cat src/Main.java", False)
+        if any('"phase": "preload"' in l and '"native-finalize"' not in l for l in led.read_text().splitlines()):
+            print("FAIL hook_never_records_requested_skills", file=sys.stderr)
+            fails += 1
+        else:
+            print("ok hook_never_records_requested_skills")
+        with (red_home / "kanban" / "logs" / "t_p0b.log").open(
+            "a", encoding="utf-8"
+        ) as fh:
+            fh.write(
+                "  ┊ 💻 $         python3 .hermes/skills/planning/admit-migration-plan/"
+                "scripts/verify-admission-receipt.py --root . "
+                "--any-status  0.2s\n"
+            )
+        r = run(
+            "",
+            roots,
+            cwd=cwd,
+            tool="write_file",
+            extra_input={"path": str(dest / "evidence" / "planning" / "ownership-map.json")},
+            extra_env=p0b,
+        )
+        if r.get("action") == "block":
+            print("FAIL p0b_write_after_same_needle_green", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok p0b_write_after_same_needle_green")
+
+    # graph-mutation veto (SAD §9): a worker never creates/links cards; K4 does
+    with tempfile.TemporaryDirectory() as td2:
+        dest2 = Path(td2) / "dest"
+        dest2.mkdir()
+        roots2 = [str(dest2)]
+        impl = {"HERMES_PROFILE": "implementer", "HERMES_WRITE_SAFE_ROOT": str(dest2)}
+        for tool_name in ("kanban_create", "kanban_link", "kanban_swarm", "kanban_decompose", "create_task"):
+            r = run("", roots2, cwd=str(dest2), tool=tool_name, extra_env=impl)
+            if r.get("action") != "block" or "K4 only" not in (r.get("message") or ""):
+                print("FAIL veto_tool_%s" % tool_name, r, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok veto_tool_%s" % tool_name)
+        for cmdline in ("hermes kanban create 'M3 hand-made' --assignee implementer", "hermes kanban link t_a t_b", "hermes kanban swarm t_x", "hermes kanban daemon --force"):
+            r = run(cmdline, roots2, cwd=str(dest2), extra_env=impl)
+            if r.get("action") != "block":
+                print("FAIL veto_cmd %r" % cmdline, r, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok veto_cmd %r" % cmdline)
+        r = run("python3 .hermes/kernel/k4_mint.py --root . --exec --verify-board", roots2, cwd=str(dest2), extra_env=impl)
+        if r.get("action") == "block":
+            print("FAIL veto_allows_k4_mint", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok veto_allows_k4_mint")
+        r = run("hermes kanban list --json", roots2, cwd=str(dest2), extra_env=impl)
+        if r.get("action") == "block":
+            print("FAIL veto_allows_list", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok veto_allows_list")
+        # request_review must name the reviewer (v6 t_b2fe5a8d: reviewer=None re-dispatched the review to the implementer)
+        r = run("", roots, cwd=cwd, tool="kanban_request_review", extra_env={"HERMES_PROFILE": "implementer", "K2_BOUND_GATE_EXIT": "0"})
+        if r.get("action") != "block" or "reviewer=reviewer" not in (r.get("message") or ""):
+            print("FAIL impl_request_review_needs_reviewer", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok impl_request_review_needs_reviewer")
+        # paved-road-m3: the implementer completes a loop card on the recorded verdict once the road ran
+        loop_env = {"HERMES_PROFILE": "implementer", "K2_BOUND_GATE_EXIT": "1", "K2_BOUND_GATE_NAME": "fix-until-green/scripts/advance"}
+        for verdict in ("ACCEPTED", "REVERTED"):
+            r = run("", roots, cwd=cwd, tool="kanban_complete", extra_env=dict(loop_env, K2_LOOP_VERDICT=verdict, K2_LOOP_ROAD="1"))
+            if r.get("action") == "block":
+                print("FAIL impl_complete_loop_%s" % verdict.lower(), r, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok impl_complete_loop_%s" % verdict.lower())
+        r = run("", roots, cwd=cwd, tool="kanban_complete", extra_env=dict(loop_env, K2_LOOP_VERDICT="ACCEPTED", K2_LOOP_ROAD="0"))
+        if r.get("action") != "block" or "brief.py" not in (r.get("message") or ""):
+            print("FAIL impl_complete_loop_without_road", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok impl_complete_loop_without_road")
+        r = run("", roots, cwd=cwd, tool="kanban_request_review", extra_input={"reviewer": "reviewer"}, extra_env=dict(loop_env, K2_LOOP_VERDICT="ACCEPTED", K2_LOOP_ROAD="1"))
+        if r.get("action") != "block" or "loop card" not in (r.get("message") or ""):
+            print("FAIL impl_request_review_on_loop_card", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok impl_request_review_on_loop_card")
+        # the durable form: the loop record under the allow root names the card, the official log shows the road
+        loop_root = Path(td) / "hermes-root-loop"
+        (loop_root / "kanban" / "logs").mkdir(parents=True)
+        loop_home = loop_root / "profiles" / "implementer"
+        loop_home.mkdir(parents=True)
+        (loop_root / "kanban" / "logs" / "t_loop.log").write_text(
+            "Query: work kanban task t_loop\n"
+            "  ┊ 📚 skill  fix-until-green\n"
+            "  ┊ 💻 $         python3 .hermes/skills/migration/fix-until-green/scripts/brief.py --root .  0.3s\n"
+            "  ┊ 🔧 patch     /projects/modernized/pom.xml  0.2s\n"
+            "  ┊ 💻 $         bash .hermes/skills/migration/fix-until-green/scripts/run-verify.sh --root .  70.4s\n"
+            "  ┊ 💻 $         python3 .hermes/skills/migration/fix-until-green/scripts/advance.py --root . --cluster c:1 --card t_loop  7.4s [exit 1]\n"
+            "REVERTED c:1 attempt 1/3: measure [1, 1, 0] did not decrease from [1, 1, 0]\n",
+            encoding="utf-8",
+        )
+        (dest / "verification" / "loop").mkdir(parents=True, exist_ok=True)
+        (dest / "verification" / "loop" / "steps.json").write_text(
+            json.dumps({"schema": "rhoai3.loop-steps/v1", "steps": [{"card": "", "cluster": "bootstrap"}], "rejected": [{"card": "t_loop", "cluster": "c:1", "reason": "no progress"}], "attempts": {"c:1": 1}}),
+            encoding="utf-8",
+        )
+        r = run("", roots, cwd=cwd, tool="kanban_complete", extra_env={"HERMES_PROFILE": "implementer", "HERMES_HOME": str(loop_home), "HERMES_KANBAN_TASK": "t_loop", "K2_BOUND_GATE_EXIT": "0"})
+        if r.get("action") == "block":
+            print("FAIL impl_complete_loop_record_and_log", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok impl_complete_loop_record_and_log")
+        r = run("", roots, cwd=cwd, tool="kanban_complete", extra_env={"HERMES_PROFILE": "implementer", "HERMES_HOME": str(loop_home), "HERMES_KANBAN_TASK": "t_other", "K2_BOUND_GATE_EXIT": "0"})
+        if r.get("action") != "block":
+            print("FAIL impl_complete_loop_unrecorded_card", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok impl_complete_loop_unrecorded_card")
+        (dest / "verification" / "loop" / "steps.json").write_text(
+            json.dumps({"schema": "rhoai3.loop-steps/v1", "steps": [{"card": "", "cluster": "bootstrap"}], "pending": [{"card": "t_pend", "cluster": "c:1", "cause": "harness"}], "rejected": [], "attempts": {}}),
+            encoding="utf-8",
+        )
+        (loop_root / "kanban" / "logs" / "t_pend.log").write_text(
+            "Query: work kanban task t_pend\n"
+            "  ┊ 💻 $         python3 .hermes/skills/migration/fix-until-green/scripts/brief.py --root .  0.3s\n"
+            "  ┊ 💻 $         bash .hermes/skills/migration/fix-until-green/scripts/run-verify.sh --root .  70.4s\n"
+            "  ┊ 💻 $         python3 .hermes/skills/migration/fix-until-green/scripts/advance.py --root . --cluster c:1 --card t_pend  7.4s [exit 1]\n"
+            "VERIFICATION_PENDING c:1 cause=harness card=t_pend: tests unknown\n",
+            encoding="utf-8",
+        )
+        r = run("", roots, cwd=cwd, tool="kanban_complete", extra_env={"HERMES_PROFILE": "implementer", "HERMES_HOME": str(loop_home), "HERMES_KANBAN_TASK": "t_pend", "K2_BOUND_GATE_EXIT": "0"})
+        if r.get("action") != "block":
+            print("FAIL impl_complete_loop_pending_refused", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok impl_complete_loop_pending_refused")
+        # V16-6 (v16 t_d3f89ded): the card log spans runs. The run that
+        # ended VERIFICATION_PENDING left advance.py [exit 1] in it, and the
+        # Operator-resumed run could run neither restore-pending.py (K2) nor
+        # advance.py (LOOP_PENDING_NOT_RESTORED): deadlock.
+        pend_env = {"HERMES_PROFILE": "implementer", "HERMES_HOME": str(loop_home), "HERMES_KANBAN_TASK": "t_pend"}
+        restore = "python3 .hermes/skills/migration/fix-until-green/scripts/restore-pending.py --root . --cluster c:1"
+        r = run(restore, roots, cwd=cwd, extra_env=pend_env)
+        if r.get("action") == "block":
+            print("FAIL v16_6_restore_allowed_with_pending_record", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok v16_6_restore_allowed_with_pending_record")
+        r = run(restore, roots, cwd=cwd, extra_env=dict(pend_env, HERMES_KANBAN_TASK="t_loop"))
+        if r.get("action") != "block":
+            print("FAIL v16_6_restore_refused_without_pending_record", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok v16_6_restore_refused_without_pending_record")
+        # the bound-gate memory is THIS run: a resumed run starts clean, and
+        # a red needle inside it still binds
+        read = "cat pom.xml"
+        r = run(read, roots, cwd=cwd, extra_env=pend_env)
+        if r.get("action") != "block":
+            print("FAIL v16_6_same_run_still_bound", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok v16_6_same_run_still_bound")
+        run2 = dict(pend_env, HERMES_KANBAN_RUN_ID="2")
+        seq = [restore, "bash .hermes/skills/migration/fix-until-green/scripts/run-verify.sh --root . --mode acceptance",
+               "python3 .hermes/skills/migration/fix-until-green/scripts/advance.py --root . --cluster c:1 --card t_pend", read]
+        got = [run(c, roots, cwd=cwd, extra_env=run2).get("action") for c in seq]
+        if "block" in got:
+            print("FAIL v16_6_resumed_run_restore_verify_advance", got, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok v16_6_resumed_run_restore_verify_advance")
+        with open(loop_root / "kanban" / "logs" / "t_pend.log", "a", encoding="utf-8") as fh:
+            fh.write("  ┊ 💻 $         python3 .hermes/skills/migration/fix-until-green/scripts/advance.py --root . --cluster c:1 --card t_pend  7.4s [exit 1]\n")
+        r = run(read, roots, cwd=cwd, extra_env=run2)
+        if r.get("action") != "block" or "advance" not in str(r.get("message")):
+            print("FAIL v16_6_red_needle_in_this_run_binds", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok v16_6_red_needle_in_this_run_binds")
+        r = run(read, roots, cwd=cwd, extra_env=dict(pend_env, HERMES_KANBAN_RUN_ID="3"))
+        if r.get("action") == "block":
+            print("FAIL v16_6_next_run_starts_clean", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok v16_6_next_run_starts_clean")
+        # V16-3: the stop request is raised by advance.py, never by a tool call
+        stop_req = loop_root / "kanban" / "stop-requests" / "t_pend.run3.json"
+        stop_env = dict(pend_env, HERMES_KANBAN_RUN_ID="3", HERMES_KANBAN_STOP_REQUEST=str(stop_req))
+        for label, cmd_, tool_, extra_ in (
+                ("write_file", "", "write_file", {"path": str(stop_req), "content": "{}"}),
+                ("redirect", "echo {} > %s" % stop_req, "terminal", None),
+                ("touch", "touch %s" % stop_req, "terminal", None),
+                ("python_open", "python3 -c \"open(\\\"%s\\\", \\\"w\\\").write(\\\"{}\\\")\"" % stop_req, "terminal", None)):
+            r = run(cmd_, roots, cwd=cwd, tool=tool_, extra_env=stop_env, extra_input=extra_)
+            if r.get("action") != "block" or "stop-requests" not in str(r.get("message")):
+                print("FAIL v16_3_stop_request_write_refused_%s" % label, r, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok v16_3_stop_request_write_refused_%s" % label)
+        # v9 t_cc3b6aac: brief.py LOOP_WRONG_CARD / LOOP_CLUSTER_NOT_OPEN is a
+        # legal stop. kanban_block must work without run-verify/advance in
+        # the log; rummage and the rest of the road must not.
+        brief_home = Path(td) / "brief-refuse-home"
+        (brief_home / "kanban" / "logs").mkdir(parents=True)
+        (brief_home / "kanban" / "logs" / "t_brief.log").write_text(
+            "Query: work kanban task t_brief\n"
+            "  ┊ 💻 $         python3 .hermes/skills/migration/fix-until-green/"
+            "scripts/brief.py --root . --cluster c:1  0.3s [exit 1]\n"
+            "REFUSE: LOOP_CLUSTER_NOT_OPEN issued cluster c:1 is not on the open work list\n",
+            encoding="utf-8",
+        )
+        (dest / "verification" / "loop").mkdir(parents=True, exist_ok=True)
+        (dest / "verification" / "loop" / "issued.json").write_text(
+            json.dumps({
+                "schema": "rhoai3.loop-issued/v1",
+                "task_id": "t_brief",
+                "cluster": "c:1",
+                "write_set": ["pom.xml"],
+            }),
+            encoding="utf-8",
+        )
+        brief_env = {
+            "HERMES_PROFILE": "implementer",
+            "HERMES_HOME": str(brief_home),
+            "HERMES_KANBAN_TASK": "t_brief",
+            "HERMES_WRITE_SAFE_ROOT": str(dest),
+            "K2_FILES_WRITABLE": "pom.xml",
+        }
+        r = run("", roots, cwd=cwd, tool="kanban_block", extra_env=brief_env)
+        if r.get("action") == "block":
+            print("FAIL brief_refuse_kanban_block_tool", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok brief_refuse_kanban_block_tool")
+        r = run("hermes kanban block t_brief", roots, cwd=cwd, extra_env=brief_env)
+        if r.get("action") == "block":
+            print("FAIL brief_refuse_kanban_block_cli", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok brief_refuse_kanban_block_cli")
+        r = run(
+            "python3 .hermes/skills/migration/fix-until-green/scripts/brief.py "
+            "--root . --cluster c:1",
+            roots,
+            cwd=cwd,
+            extra_env=brief_env,
+        )
+        if r.get("action") == "block":
+            print("FAIL brief_refuse_rerun_brief", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok brief_refuse_rerun_brief")
+        r = run(
+            "cat verification/loop/issued.json",
+            roots,
+            cwd=cwd,
+            extra_env=brief_env,
+        )
+        msg = r.get("message") or ""
+        if r.get("action") != "block" or "continue after mandated" not in msg:
+            print("FAIL brief_refuse_rummage_refused", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok brief_refuse_rummage_refused")
+        r = run(
+            "bash .hermes/skills/migration/fix-until-green/scripts/run-verify.sh --root .",
+            roots,
+            cwd=cwd,
+            extra_env=brief_env,
+        )
+        msg = r.get("message") or ""
+        if r.get("action") != "block" or "continue after mandated" not in msg:
+            print("FAIL brief_refuse_run_verify_refused", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok brief_refuse_run_verify_refused")
+        r = run("", roots, cwd=cwd, tool="kanban_complete", extra_env=brief_env)
+        if r.get("action") != "block":
+            print("FAIL brief_refuse_complete_refused", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok brief_refuse_complete_refused")
+        # v7 item 8: inline python is refused on the issued loop card only; scripts the road names stay allowed
+        (dest / "verification" / "loop" / "issued.json").write_text(json.dumps({"schema": "rhoai3.loop-issued/v1", "task_id": "t_loopcard", "cluster": "c:1"}), encoding="utf-8")
+        loop_card_env = {"HERMES_PROFILE": "implementer", "HERMES_KANBAN_TASK": "t_loopcard", "K2_BOUND_GATE_EXIT": "0"}
+        for cmdline in ("python3 -c \"import json; print(json.load(open('verification/loop/state.json')))\"", "cd /projects/modernized && python3 - <<'PY'\nprint(1)\nPY"):
+            r = run(cmdline, roots, cwd=cwd, extra_env=loop_card_env)
+            if r.get("action") != "block" or "brief" not in (r.get("message") or ""):
+                print("FAIL loop_card_inline_python_refused %r" % cmdline, r, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok loop_card_inline_python_refused")
+        r = run("python3 -c \"print(1)\"", roots, cwd=cwd, extra_env=loop_card_env)
+        if not all(x in (r.get("message") or "") for x in ("--card", "--spill <file> --field <path>", "--item <id>")):
+            print("FAIL loop_card_refusal_names_the_selectors", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok loop_card_refusal_names_the_selectors")
+        for cmdline in ("python3 .hermes/skills/migration/fix-until-green/scripts/brief.py --root .", "cat verification/loop/brief-c-1.json", "bash .hermes/skills/migration/fix-until-green/scripts/run-verify.sh --root .",
+                        # v29 Owner run 89: the selectors the refusal names are themselves allowed on the loop card
+                        "python3 .hermes/skills/migration/fix-until-green/scripts/brief.py --root . --card",
+                        "python3 .hermes/skills/migration/fix-until-green/scripts/brief.py --root . --spill .hermes/home/profiles/implementer/cache/spillover/chatcmpl-tool-x.txt --field task.body",
+                        "python3 .hermes/skills/migration/fix-until-green/scripts/brief.py --root . --item parity:4a43e638d94c08fb"):
+            r = run(cmdline, roots, cwd=cwd, extra_env=loop_card_env)
+            if r.get("action") == "block" and "inline python" in (r.get("message") or ""):
+                print("FAIL loop_card_road_allowed %r" % cmdline, r, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok loop_card_road_allowed")
+        r = run("", roots, cwd=cwd, tool="execute_code", extra_input={"code": "print(1)"}, extra_env=loop_card_env)
+        if r.get("action") != "block":  # refused by the mutation rule or the loop-card rule; either way it does not run
+            print("FAIL loop_card_execute_code_refused", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok loop_card_execute_code_refused")
+        r = run("python3 -c \"print(1)\"", roots, cwd=cwd, extra_env={"HERMES_PROFILE": "implementer", "HERMES_KANBAN_TASK": "t_notloop", "K2_BOUND_GATE_EXIT": "0"})
+        if r.get("action") == "block" and "inline python" in (r.get("message") or ""):
+            print("FAIL non_loop_card_inline_python_allowed", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok non_loop_card_inline_python_allowed")
+        # the evidence rule: a server the worker starts, a dev-profile build or a
+        # jar it runs is not the measured artifact on a loop card (v9 t_d280284d)
+        for cmdline in ("mvn quarkus:dev", "cd /projects/modernized && ./mvnw -q quarkus:dev -Dquarkus.http.port=8081",
+                        "mvn -o quarkus:run", "java -jar target/quarkus-app/quarkus-run.jar", "mvn package -Dquarkus.profile=dev",
+                        "quarkus dev", "nohup java -Dquarkus.http.port=8081 -jar target/quarkus-app/quarkus-run.jar &"):
+            r = run(cmdline, roots, cwd=cwd, extra_env=loop_card_env)
+            if r.get("action") != "block" or "starting the application refused" not in (r.get("message") or ""):
+                print("FAIL loop_card_app_start_refused %r" % cmdline, r, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok loop_card_app_start_refused")
+        for cmdline in ("bash .hermes/skills/migration/fix-until-green/scripts/run-verify.sh --root . --mode acceptance",
+                        "cat verification/parity/receipt.json", "grep -n quarkus:dev pom.xml"):
+            r = run(cmdline, roots, cwd=cwd, extra_env=loop_card_env)
+            if r.get("action") == "block" and "starting the application" in (r.get("message") or ""):
+                print("FAIL loop_card_app_start_road_allowed %r" % cmdline, r, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok loop_card_app_start_road_allowed")
+        r = run("mvn quarkus:dev", roots, cwd=cwd, extra_env={"HERMES_PROFILE": "implementer", "HERMES_KANBAN_TASK": "t_notloop", "K2_BOUND_GATE_EXIT": "0"})
+        if r.get("action") == "block" and "starting the application" in (r.get("message") or ""):
+            print("FAIL non_loop_card_app_start_allowed", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok non_loop_card_app_start_allowed")
+        # H9b: advance.py under the terminal tool's own timeout, or a coreutils
+        # `timeout 600` prefix, is the road step it always was
+        for cmdline in ("timeout 600 python3 .hermes/skills/migration/fix-until-green/scripts/advance.py --root . --cluster c:1 --card t_loopcard",
+                        "python3 .hermes/skills/migration/fix-until-green/scripts/advance.py --root . --cluster c:1 --card t_loopcard"):
+            r = run(cmdline, roots, cwd=cwd, extra_env=loop_card_env)
+            if r.get("action") == "block":
+                print("FAIL loop_card_advance_timeout_prefix_allowed %r" % cmdline, r, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok loop_card_advance_timeout_prefix_allowed")
+        # H9a (dest v9 t_2da2458b): the REAL hook payload -- tool_input, the Hermes PROCESS cwd (not the
+        # session's), extra.task_id -- with the process cwd a directory that is NOT the dest root. The
+        # file tools resolve a relative path against the session cwd (the dest root for a loop card), so
+        # K2 must too: write_file / patch (mode replace, and mode patch with the path inside the V4A
+        # text) on the AMENDED file pass, on a third file are refused, and sed on the third file is refused.
+        (dest / "src" / "main" / "java").mkdir(parents=True, exist_ok=True)
+        for name in ("Ctl.java", "Impl.java", "Other.java"):
+            (dest / "src" / "main" / "java" / name).write_text("class X {}", encoding="utf-8")
+        (dest / "verification" / "loop" / "issued.json").write_text(json.dumps(
+            {"schema": "rhoai3.loop-issued/v1", "task_id": "t_loopcard", "cluster": "c:1",
+             "write_set": ["src/main/java/Ctl.java", "src/main/java/Impl.java"],
+             "amendments": [{"path": "src/main/java/Impl.java", "reason": "the 5xx stack's first product frame"}]}), encoding="utf-8")
+        real_env = dict(loop_card_env, K2_FILES_WRITABLE="src/main/java/Ctl.java", HERMES_WRITE_SAFE_ROOT=str(dest))
+        real_extra = {"hook_event_name": "pre_tool_call", "session_id": "s1", "extra": {"task_id": "t_loopcard", "tool_call_id": "call-1"}}
+        parent_cwd = str(dest.parent)
+        v4a = "*** Begin Patch\n*** Update File: %s\n@@ class @@\n-class X {}\n+class Y {}\n*** End Patch\n"
+        impl_rel, impl_abs, other_rel = "src/main/java/Impl.java", str(dest / "src/main/java/Impl.java"), "src/main/java/Other.java"
+        for label, tl, ti in (("write_file rel", "write_file", {"path": impl_rel, "content": "x"}),
+                              ("write_file abs", "write_file", {"path": impl_abs, "content": "x"}),
+                              ("patch replace rel", "patch", {"mode": "replace", "path": impl_rel, "old_string": "X", "new_string": "Y"}),
+                              ("patch replace abs", "patch", {"mode": "replace", "path": impl_abs, "old_string": "X", "new_string": "Y"}),
+                              ("patch v4a rel", "patch", {"mode": "patch", "patch": v4a % impl_rel}),
+                              ("patch v4a abs", "patch", {"mode": "patch", "patch": v4a % impl_abs})):
+            r = run("", roots, cwd=parent_cwd, tool=tl, extra_input=ti, extra_payload=real_extra, extra_env=real_env)
+            if r.get("action") == "block":
+                print("FAIL amended_path_real_payload_allowed %s" % label, r, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok amended_path_real_payload_allowed")
+        for label, tl, ti in (("write_file rel", "write_file", {"path": other_rel, "content": "x"}),
+                              ("patch replace rel", "patch", {"mode": "replace", "path": other_rel, "old_string": "X", "new_string": "Y"}),
+                              ("patch v4a rel", "patch", {"mode": "patch", "patch": v4a % other_rel}),
+                              ("patch v4a abs", "patch", {"mode": "patch", "patch": v4a % str(dest / other_rel)}),
+                              ("sed rel", "terminal", {"command": "sed -i 's/X/Y/' src/main/java/Other.java"}),
+                              ("sed abs", "terminal", {"command": "sed -i 's/X/Y/' %s" % (dest / other_rel)})):
+            r = run(ti.get("command", ""), roots, cwd=parent_cwd, tool=tl, extra_input={k: v for k, v in ti.items() if k != "command"},
+                    extra_payload=real_extra, extra_env=real_env)
+            if r.get("action") != "block" or "outside" not in (r.get("message") or ""):
+                print("FAIL third_file_real_payload_refused %s" % label, r, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok third_file_real_payload_refused")
+        # H9b: a card whose step is recorded ACCEPTED has one terminator; kanban_block on it is refused
+        (dest / "verification" / "loop" / "steps.json").write_text(json.dumps({"steps": [
+            {"cluster": "", "card": "", "verdict": "accepted", "commit": "0000000000"},
+            {"cluster": "c:1", "card": "t_loopcard", "verdict": "accepted", "commit": "825dd0cabc123456"}]}), encoding="utf-8")
+        (dest / "verification" / "loop" / "issued.json").unlink()
+        r = run("", roots, cwd=cwd, tool="kanban_block", extra_input={"task_id": "t_loopcard", "kind": "needs_input", "reason": "LOOP_STALE_STATE"}, extra_env=loop_card_env)
+        if r.get("action") != "block" or "acceptance of this card is recorded" not in (r.get("message") or "") or "825dd0cabc12" not in (r.get("message") or ""):
+            print("FAIL accepted_card_block_refused", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok accepted_card_block_refused")
+        r = run("", roots, cwd=cwd, tool="kanban_complete", extra_input={"task_id": "t_loopcard"}, extra_env=dict(loop_card_env, K2_LOOP_ROAD="1", K2_LOOP_VERDICT="ACCEPTED"))
+        if r.get("action") == "block" and "acceptance of this card is recorded" in (r.get("message") or ""):
+            print("FAIL accepted_card_complete_allowed", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok accepted_card_complete_allowed")
+        r = run("", roots, cwd=cwd, tool="kanban_block", extra_input={"task_id": "t_other", "kind": "needs_input", "reason": "x"},
+                extra_env=dict(loop_card_env, HERMES_KANBAN_TASK="t_other"))
+        if r.get("action") == "block" and "acceptance of this card is recorded" in (r.get("message") or ""):
+            print("FAIL unaccepted_card_block_allowed", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok unaccepted_card_block_allowed")
+        (dest / "verification" / "loop" / "steps.json").unlink()
+        (dest / "verification" / "loop" / "issued.json").write_text(json.dumps({"schema": "rhoai3.loop-issued/v1", "task_id": "t_loopcard", "cluster": "c:1"}), encoding="utf-8")
+        # a loop card may not write a product path outside its write set: advance reverts the whole candidate over one
+        (dest / "verification" / "loop" / "issued.json").write_text(json.dumps({"schema": "rhoai3.loop-issued/v1", "task_id": "t_loopcard", "cluster": "c:1", "write_set": ["pom.xml"]}), encoding="utf-8")
+        for target in ("tmp-deps/x.jar", "src/main/java/A.java"):
+            r = run("", roots, cwd=cwd, tool="write_file", extra_input={"path": str(dest / target), "content": "x"}, extra_env=loop_card_env)
+            if r.get("action") != "block" or "outside this card write set" not in (r.get("message") or ""):
+                print("FAIL loop_write_outside_write_set %s" % target, r, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok loop_write_outside_write_set")
+        for target in ("pom.xml", "verification/build/scratch.txt", "evidence/notes.json"):
+            r = run("", roots, cwd=cwd, tool="write_file", extra_input={"path": str(dest / target), "content": "x"}, extra_env=loop_card_env)
+            if r.get("action") == "block" and "outside this card write set" in (r.get("message") or ""):
+                print("FAIL loop_write_allowed %s" % target, r, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok loop_write_allowed")
+        # v32: a heredoc BODY written by cat/tee is data -- identifier-like and path-like tokens in it, and a
+        # `> other/file` line, are never write targets; the target is the redirection (or tee operand) alone
+        body = ("public class EntryStore {\n    Map<String, Entry> addEntry(Entry e) { return ledger; }\n"
+                "    // see src/main/java/org/example/ledger/Other.java and ./notes /etc/passwd\n"
+                "    echo x > other/file\n}\n")
+        heredocs = (("cat > pom.xml <<%sEOF%s\n%sEOF", "quoted"), ("cat > pom.xml <<-EOF%s%s\n%sEOF", "dash"),
+                    ("cat <<%sEOF%s > pom.xml\n%sEOF", "target_after"), ("tee pom.xml >/dev/null <<%sEOF%s\n%sEOF", "tee"))
+        for shape, label in heredocs:
+            q = "" if label == "dash" else chr(39)
+            text = shape % (q, q, body) if "%sEOF%s" in shape else shape % ("", "", body)
+            r = run(text, roots, cwd=cwd, extra_env=loop_card_env)
+            if r.get("action") == "block":
+                print("FAIL heredoc_body_not_a_target_%s" % label, r, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok heredoc_body_not_a_target_%s" % label)
+        for text, label, needle in (
+                ("cat > src/main/java/org/example/ledger/EntryStore.java <<%sEOF%s\n%sEOF" % (chr(39), chr(39), body),
+                 "out_of_issue_target_refused", "outside this card write set"),
+                ("cat > pom.xml <<EOF\n$(cat /etc/passwd)\nEOF", "unquoted_expanding_body_still_read", "outside allow root"),
+                ("bash <<%sEOF%s\ncat /etc/passwd\nEOF" % (chr(39), chr(39)), "interpreter_body_still_read", "outside allow root"),
+                ("cat <<%sEOF%s | sh\ncat /etc/passwd\nEOF" % (chr(39), chr(39)), "body_piped_to_interpreter_still_read",
+                 "outside allow root")):
+            r = run(text, roots, cwd=cwd, extra_env=loop_card_env)
+            if r.get("action") != "block" or needle not in (r.get("message") or ""):
+                print("FAIL heredoc_%s" % label, r, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok heredoc_%s" % label)
+        # v32 (advisory, never a decision): write_file over an EXISTING product file records a patch advisory on its
+        # ledger row (the pre_tool_call allow path carries no message); a new file gets none; both are allowed alike
+        adv_home = Path(td) / "adv-home"
+        (adv_home / "kanban" / "logs").mkdir(parents=True)
+        adv_env = dict(loop_card_env, HERMES_HOME=str(adv_home), HERMES_WRITE_SAFE_ROOT=str(dest))
+        pom_before = (dest / "pom.xml").read_bytes() if (dest / "pom.xml").exists() else None
+        (dest / "pom.xml").write_text("<project/>\n", encoding="utf-8")
+        led = adv_home / "kanban" / "logs" / "t_loopcard.exec.jsonl"
+        for target, existing in (("pom.xml", True), ("verification/new-notes.txt", False), ("pom-new.xml", False)):
+            if not existing and (dest / target).exists():
+                (dest / target).unlink()
+            led.write_text("", encoding="utf-8")
+            r = run("", roots, cwd=cwd, tool="write_file", extra_input={"path": str(dest / target), "content": "x"},
+                    extra_env=adv_env)
+            r0 = run("", roots, cwd=cwd, tool="write_file", extra_input={"path": str(dest / target), "content": "x"},
+                     extra_env=loop_card_env)
+            rows = [json.loads(x) for x in led.read_text(encoding="utf-8").splitlines() if x.strip()]
+            advice = [x.get("advice") for x in rows if x.get("advice")]
+            want = ["advisory: %s already exists -- edit an existing file with patch" % target] if existing else []
+            if r.get("action") != r0.get("action") or len(advice) != len(want) \
+                    or (want and not advice[0].startswith(want[0])) or (want and "re-read the exact lines" not in advice[0]):
+                print("FAIL patch_advisory_%s" % ("existing" if existing else "new"), target, r, r0, rows, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok patch_advisory_%s" % ("existing" if existing else "new"))
+        if pom_before is None:
+            (dest / "pom.xml").unlink()
+        else:
+            (dest / "pom.xml").write_bytes(pom_before)
+        # ADR-015/ADR-019: the generated test roots are the harness's; a worker write there is refused even when
+        # the card's write set (wrongly) names the file. The roots come from the generator's own declaration.
+        sys.path.insert(0, str(HOOK.parent.parent / "skills" / "gates" / "generate-product-tests" / "scripts"))
+        import parity_pom  # noqa: PLC0415
+        gen_file = "%s/org/x/generated/AParityTest.java" % parity_pom.DEFAULT_OUT
+        gen_res = "%s/generated/a.body" % parity_pom.DEFAULT_RESOURCES
+        (dest / "verification" / "loop" / "issued.json").write_text(json.dumps({"schema": "rhoai3.loop-issued/v1", "task_id": "t_loopcard", "cluster": "c:1", "write_set": ["pom.xml", gen_file, gen_res]}), encoding="utf-8")
+        for target in (gen_file, gen_res):
+            r = run("", roots, cwd=cwd, tool="write_file", extra_input={"path": str(dest / target), "content": "x"}, extra_env=loop_card_env)
+            if r.get("action") != "block" or "harness-owned generated test root" not in (r.get("message") or ""):
+                print("FAIL generated_root_write_refused_despite_write_set %s" % target, r, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok generated_root_write_refused_despite_write_set")
+        for cmdline in ("sed -n p ./verification/x > %s" % gen_file, "cp ./verification/x %s" % gen_file,
+                        "tee %s < ./verification/x" % gen_file, "rm -f %s" % gen_file):
+            r = run(cmdline, roots, cwd=cwd, extra_env=loop_card_env)
+            if r.get("action") != "block" or "harness-owned generated test root" not in (r.get("message") or ""):
+                print("FAIL generated_root_command_refused %r" % cmdline, r, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok generated_root_command_refused")
+        r = run("", roots, cwd=cwd, tool="write_file", extra_input={"path": str(dest / gen_file), "content": "x"}, extra_env={"HERMES_PROFILE": "implementer", "HERMES_KANBAN_TASK": "t_story", "K2_BOUND_GATE_EXIT": "0"})
+        if r.get("action") != "block" or "harness-owned generated test root" not in (r.get("message") or ""):
+            print("FAIL generated_root_refused_for_any_implementer", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok generated_root_refused_for_any_implementer")
+        # the manifest can declare a root of its own; it is honoured too
+        man = dest / parity_pom.GENERATED_MANIFEST
+        man.parent.mkdir(parents=True, exist_ok=True)
+        man.write_text(json.dumps({"out": "src/it-generated/java", "resources": "src/it-generated/resources"}), encoding="utf-8")
+        r = run("", roots, cwd=cwd, tool="write_file", extra_input={"path": str(dest / "src/it-generated/java/B.java"), "content": "x"}, extra_env=dict(loop_card_env, HERMES_WRITE_SAFE_ROOT=str(dest)))
+        if r.get("action") != "block" or "harness-owned generated test root" not in (r.get("message") or ""):
+            print("FAIL generated_root_from_manifest_refused", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok generated_root_from_manifest_refused")
+        man.unlink()
+        # an ordinary write in the write set is unaffected, and a reviewer reading the generated tests is unaffected
+        r = run("", roots, cwd=cwd, tool="write_file", extra_input={"path": str(dest / "pom.xml"), "content": "x"}, extra_env=loop_card_env)
+        if r.get("action") == "block":
+            print("FAIL generated_root_rule_leaves_write_set_alone", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok generated_root_rule_leaves_write_set_alone")
+        r = run("cat %s" % gen_file, roots, cwd=cwd, extra_env=loop_card_env)
+        if r.get("action") == "block" and "harness-owned" in (r.get("message") or ""):
+            print("FAIL generated_root_read_allowed", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok generated_root_read_allowed")
+        # H4 (dest v9 t_4d75569c): amend-scope.py widened the ISSUED card's write set on the record (Pet.java), the
+        # card body's files_writable stayed as minted, and K2 refused the file-tool write to the amended path --
+        # while a terminal `sed -i` on it went unseen. The file tool honours the issued record beside the body's
+        # list; terminal in-place editors and redirections name their operands and are checked against the same set.
+        (dest / "src" / "main" / "java").mkdir(parents=True, exist_ok=True)
+        for name in ("Ctl.java", "Pet.java", "Other.java"):
+            (dest / "src" / "main" / "java" / name).write_text("class X {}", encoding="utf-8")
+        (dest / "verification" / "loop" / "issued.json").write_text(json.dumps(
+            {"schema": "rhoai3.loop-issued/v1", "task_id": "t_loopcard", "cluster": "c:1",
+             "write_set": ["src/main/java/Ctl.java", "src/main/java/Pet.java"],
+             "amendments": [{"path": "src/main/java/Pet.java", "reason": "the order-only body difference is produced by Pet.getVisits()"}]}),
+            encoding="utf-8")
+        amended_env = dict(loop_card_env, K2_FILES_WRITABLE="src/main/java/Ctl.java")
+        r = run("", roots, cwd=cwd, tool="write_file", extra_input={"path": str(dest / "src/main/java/Pet.java"), "content": "x"}, extra_env=amended_env)
+        if r.get("action") == "block":
+            print("FAIL amended_path_file_write_allowed", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok amended_path_file_write_allowed")
+        r = run("", roots, cwd=cwd, tool="write_file", extra_input={"path": str(dest / "src/main/java/Other.java"), "content": "x"}, extra_env=amended_env)
+        if r.get("action") != "block" or "outside" not in (r.get("message") or ""):
+            print("FAIL unamended_path_file_write_refused", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok unamended_path_file_write_refused")
+        for cmdline in ("sed -i 's/naturalOrder/reverseOrder/' src/main/java/Other.java",
+                        "sed -i '' -e 's/a/b/' ./src/main/java/Other.java",
+                        "sed --in-place=.bak -e 's/a/b/' src/main/java/Other.java",
+                        "perl -pi -e 's/a/b/' src/main/java/Other.java",
+                        "cd %s && sed -i 's/a/b/' src/main/java/Other.java" % dest,
+                        "echo x > src/main/java/Other.java",
+                        "cat verification/x >> src/main/java/Other.java"):
+            r = run(cmdline, roots, cwd=cwd, extra_env=amended_env)
+            if r.get("action") != "block" or "outside" not in (r.get("message") or ""):
+                print("FAIL terminal_edit_outside_write_set_refused %r" % cmdline, r, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok terminal_edit_outside_write_set_refused")
+        for cmdline in ("sed -i 's/naturalOrder/reverseOrder/' src/main/java/Pet.java",
+                        "perl -pi -e 's/a/b/' src/main/java/Ctl.java",
+                        "sed -n '1,5p' src/main/java/Other.java",
+                        "sed -e 's/a/b/' src/main/java/Other.java | head",
+                        "grep -n order src/main/java/Other.java",
+                        "mvn -q verify 2>/dev/null"):
+            r = run(cmdline, roots, cwd=cwd, extra_env=amended_env)
+            if r.get("action") == "block":
+                print("FAIL terminal_edit_in_write_set_or_read_allowed %r" % cmdline, r, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok terminal_edit_in_write_set_or_read_allowed")
+        # without an issued record the body's list alone decides, as before
+        (dest / "verification" / "loop" / "issued.json").unlink()
+        r = run("", roots, cwd=cwd, tool="write_file", extra_input={"path": str(dest / "src/main/java/Pet.java"), "content": "x"}, extra_env=amended_env)
+        if r.get("action") != "block" or "files_writable" not in (r.get("message") or ""):
+            print("FAIL body_list_alone_without_issued_record", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok body_list_alone_without_issued_record")
+        (dest / "verification" / "loop" / "issued.json").write_text(json.dumps({"schema": "rhoai3.loop-issued/v1", "task_id": "t_loopcard", "cluster": "c:1", "write_set": ["pom.xml"]}), encoding="utf-8")
+        r = run("", roots, cwd=cwd, tool="write_file", extra_input={"path": str(dest / "tmp-deps/x.jar"), "content": "x"}, extra_env={"HERMES_PROFILE": "implementer", "HERMES_KANBAN_TASK": "t_notloop", "K2_BOUND_GATE_EXIT": "0"})
+        if r.get("action") == "block" and "outside this card write set" in (r.get("message") or ""):
+            print("FAIL non_loop_write_unrestricted", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok non_loop_write_unrestricted")
+        (dest / "verification" / "loop" / "issued.json").unlink()
+        r = run("", roots, cwd=cwd, tool="kanban_request_review", extra_input={"reviewer": "reviewer", "summary": "x"}, extra_env={"HERMES_PROFILE": "implementer", "K2_BOUND_GATE_EXIT": "0"})
+        if r.get("action") == "block":
+            print("FAIL impl_request_review_with_reviewer_allowed", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok impl_request_review_with_reviewer_allowed")
+        r = run("hermes kanban request-review t_x --reviewer reviewer", roots, cwd=cwd, extra_env={"HERMES_PROFILE": "implementer", "K2_BOUND_GATE_EXIT": "0"})
+        if r.get("action") == "block":
+            print("FAIL impl_request_review_cli_reviewer_allowed", r, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok impl_request_review_cli_reviewer_allowed")
+    fails += scratch_removal_checks()
+    return 1 if fails else 0
+
+
+ADVANCE = (Path(__file__).resolve().parents[1] / "skills" / "migration" / "fix-until-green" / "scripts" / "advance.py")
+ADVANCE_LINE = ("  ┊ 💻 $         python3 .hermes/skills/migration/fix-until-green/scripts/advance.py "
+                "--root . --cluster c:1 --card t_scr  1.2s [exit 1]\n")
+
+
+def scratch_refusal_line(paths: list[str]) -> str:
+    """advance.py's LOOP_SCRATCH_IN_TREE line, built the way advance.py builds it."""
+    return ("REFUSE: LOOP_SCRATCH_IN_TREE %d untracked file(s) outside this migration's product sit in the tree "
+            "and moved the candidate digest: %s. The verified candidate is otherwise intact, so nothing is "
+            "judged, no attempt is spent and the candidate stays where it is: remove the files (they are tool "
+            "output, not a repair) and run advance.py again.\n"
+            % (len(paths), ", ".join(paths[:8]) + (", ..." if len(paths) > 8 else "")))
+
+
+def scratch_removal_checks() -> int:
+    """v9: advance.py refused LOOP_SCRATCH_IN_TREE and asked for the named
+    files to be removed; K2 refused the rm as a product-tree write while
+    advance was red, so the worker could only block. The removal of exactly
+    the named paths is allowed while that refusal is the latest advance
+    output; nothing else is."""
+    fails = 0
+    src = ADVANCE.read_text(encoding="utf-8")
+    # the format the hook parses is advance.py's own
+    for frag in ('"REFUSE: LOOP_SCRATCH_IN_TREE %d untracked file(s) outside this migration\'s product sit in the tree "',
+                 '"and moved the candidate digest: %s. The verified candidate is otherwise intact',
+                 '", ".join(scratch[:8]) + (", ..." if len(scratch) > 8 else "")'):
+        if frag not in src:
+            print("FAIL scratch_refusal_format_drifted %r" % frag, file=sys.stderr)
+            fails += 1
+    with tempfile.TemporaryDirectory() as td:
+        dest = Path(td) / "dest"
+        (dest / "src" / "main" / "java").mkdir(parents=True)
+        (dest / "io" / "quarkus").mkdir(parents=True)
+        (dest / "io" / "quarkus" / "A.class").write_bytes(b"x")
+        (dest / "io" / "quarkus" / "B.class").write_bytes(b"x")
+        (dest / "notes.txt").write_text("x", encoding="utf-8")
+        (dest / "pom.xml").write_text("<project/>", encoding="utf-8")
+        (dest / "verification" / "loop").mkdir(parents=True)
+        (dest / "verification" / "loop" / "issued.json").write_text(json.dumps(
+            {"schema": "rhoai3.loop-issued/v1", "task_id": "t_scr", "cluster": "c:1",
+             "write_set": ["src/main/java/App.java"]}), encoding="utf-8")
+        home = Path(td) / "home"
+        (home / "kanban" / "logs").mkdir(parents=True)
+        log = home / "kanban" / "logs" / "t_scr.log"
+        named = ["io/quarkus/A.class", "io/quarkus/B.class"]
+        base_log = ("Query: work kanban task t_scr\n"
+                    "  ┊ 💻 $         bash .hermes/skills/migration/fix-until-green/scripts/run-verify.sh --root .  70.4s\n")
+        log.write_text(base_log + ADVANCE_LINE + scratch_refusal_line(named), encoding="utf-8")
+        roots = [str(dest)]
+        env = {"HERMES_PROFILE": "implementer", "HERMES_HOME": str(home), "HERMES_KANBAN_TASK": "t_scr",
+               "HERMES_WRITE_SAFE_ROOT": str(dest)}
+        cwd = str(dest)
+
+        def check(cmd: str, name: str, allowed: bool, needle: str = "") -> None:
+            nonlocal fails
+            r = run(cmd, roots, cwd=cwd, extra_env=env)
+            blocked = r.get("action") == "block"
+            if blocked == allowed or (needle and needle not in (r.get("message") or "")):
+                print("FAIL %s %r" % (name, cmd), r, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok", name)
+
+        for cmd in ("rm io/quarkus/A.class io/quarkus/B.class",
+                    "rm -f io/quarkus/A.class",
+                    "rm -rf io/quarkus/A.class io/quarkus/B.class",
+                    "rm -r -f -- io/quarkus/B.class",
+                    "rm %s" % (dest / "io" / "quarkus" / "A.class")):
+            check(cmd, "scratch_removal_named_allowed", True)
+        for cmd, why in (("rm pom.xml", "product file"),
+                         ("rm -rf src/main/java", "product dir"),
+                         ("rm -rf src", "product dir"),
+                         ("rm notes.txt", "unnamed path"),
+                         ("rm io/quarkus/A.class notes.txt", "one unnamed operand"),
+                         ("rm -rf io", "ancestor of a named path"),
+                         ("rm -rf io/quarkus/*.class", "glob"),
+                         ("rm io/quarkus/?.class", "glob"),
+                         ("rm io/quarkus/../quarkus/A.class", "dotdot"),
+                         ("rm ../dest/io/quarkus/A.class", "dotdot"),
+                         ("rm /etc/io/quarkus/A.class", "absolute outside root"),
+                         ("rm -rf .", "root itself"),
+                         ("rm -i io/quarkus/A.class", "unlisted flag"),
+                         ("rm io/quarkus/A.class; rm pom.xml", "compound"),
+                         ("rm io/quarkus/A.class && touch pom.xml", "compound"),
+                         ("rm $(cat list) ", "substitution"),
+                         ("mv io/quarkus/A.class /tmp/x", "not rm"),
+                         ("cat io/quarkus/A.class", "not a removal")):
+            check(cmd, "scratch_removal_refused (%s)" % why, False)
+        # a rm of a product file names the red advance, as before
+        check("rm pom.xml", "scratch_removal_product_message", False, "product-tree write refused")
+        # re-running advance is still the legal next step
+        check("python3 .hermes/skills/migration/fix-until-green/scripts/advance.py --root . --cluster c:1 --card t_scr",
+              "scratch_rerun_advance_allowed", True)
+        # a later tool call after the refusal does not withdraw it; a later
+        # advance verdict does
+        log.write_text(base_log + ADVANCE_LINE + scratch_refusal_line(named)
+                       + "  ┊ 💻 $         bash .hermes/skills/migration/fix-until-green/scripts/run-verify.sh --root .  70.4s\n",
+                       encoding="utf-8")
+        check("rm io/quarkus/A.class", "scratch_removal_after_run_verify_allowed", True)
+        log.write_text(base_log + ADVANCE_LINE + scratch_refusal_line(named) + ADVANCE_LINE
+                       + "REVERTED c:1 attempt 1/3: measure [1, 1, 0] did not decrease from [1, 1, 0]\n",
+                       encoding="utf-8")
+        check("rm io/quarkus/A.class", "scratch_removal_after_later_verdict_refused", False, "product-tree write refused")
+        log.write_text(base_log + ADVANCE_LINE + scratch_refusal_line(named) + ADVANCE_LINE
+                       + "REFUSE: LOOP_CANDIDATE_CHANGED product tree edited after verification (verified a, on disk b); nothing promoted\n",
+                       encoding="utf-8")
+        check("rm io/quarkus/A.class", "scratch_removal_after_other_refusal_refused", False)
+        # prose that quotes the refusal after another tool call is not advance output
+        log.write_text(base_log + ADVANCE_LINE + "REVERTED c:1 attempt 1/3: no progress\n"
+                       + "  ┊ 💻 $         cat verification/loop/state.json  0.1s\n" + scratch_refusal_line(named),
+                       encoding="utf-8")
+        check("rm io/quarkus/A.class", "scratch_removal_quoted_prose_refused", False)
+        # the truncated list names only the paths it printed
+        many = ["tmp-%d/x.class" % i for i in range(10)]
+        log.write_text(base_log + ADVANCE_LINE + scratch_refusal_line(many), encoding="utf-8")
+        check("rm -rf tmp-0/x.class tmp-7/x.class", "scratch_removal_truncated_named_allowed", True)
+        check("rm tmp-8/x.class", "scratch_removal_truncated_unprinted_refused", False)
+        check("rm ...", "scratch_removal_ellipsis_refused", False)
+    return fails
+
+
+def v17_1_qualification() -> int:
+    """V17-1 qualification (2353a4d4): trimming a separator written against a
+    path must not weaken path or command enforcement. An outside path glued to
+    each of ; && || | & is refused; an allowed path glued to each (followed by
+    a space) is allowed; a second outside command, an opaque decode, a git
+    mutation or a traversal behind a separator is still refused. A separator
+    glued on BOTH sides of an allowed path (`ls /x;echo ok`) is still refused
+    by this hook (fail-closed; recorded as an open item, not asserted here)."""
+    fails = 0
+    with tempfile.TemporaryDirectory() as td:
+        dest = Path(td) / "mod"
+        (dest / "src").mkdir(parents=True)
+        roots = [str(dest)]
+        cwd = str(dest)
+        wk = {"HERMES_PROFILE": "implementer", "K2_BOUND_GATE_EXIT": "0"}
+
+        def expect(cmd: str, name: str, block: bool, needle: str = "", **kw) -> None:
+            nonlocal fails
+            r = run(cmd, roots, cwd=cwd, **kw)
+            got = r.get("action") == "block" and needle in (r.get("message") or "")
+            if got != block or (not block and r.get("action") == "block"):
+                print("FAIL", name, r, file=sys.stderr)
+                fails += 1
+            else:
+                print("ok", name)
+
+        for i, sep in enumerate((";", "&&", "||", "|", "&")):
+            expect("cat /etc/passwd%s echo x" % sep, "v17_1_q_outside_glued_%d" % i, True, "/etc/passwd")
+            expect("ls %s%s echo ok" % (dest, sep), "v17_1_q_allowed_glued_%d" % i, False)
+        expect("ls %s; cat /etc/shadow" % dest, "v17_1_q_second_command_outside", True, "/etc/shadow")
+        expect("ls %s;cat /etc/shadow" % dest, "v17_1_q_second_command_outside_nospace", True, "outside allow root")
+        expect("ls %s|cat /etc/shadow" % dest, "v17_1_q_outside_after_glued_pipe", True, "outside allow root")
+        expect("ls %s; echo L2V0Yy9wYXNzd2Q= | base64 -d | xargs cat" % dest, "v17_1_q_opaque_after_separator", True, "opaque")
+        expect("ls %s; git checkout -- .hermes/pins.json" % dest, "v17_1_q_git_mutation_after_separator", True, "refused",
+               extra_env=wk)
+        expect("cat %s/../../etc/passwd; echo x" % dest, "v17_1_q_traversal_then_separator", True, "outside allow root")
+        for i, sep in enumerate((";", "&&", "||", "|", "&")):
+            expect("ls %s%secho ok" % (dest, sep), "v17_1_q_allowed_glued_both_%d" % i, False)
+            expect("ls %s%scat /etc/shadow" % (dest, sep), "v17_1_q_outside_glued_both_%d" % i, True, "outside allow root")
+        expect("ls %s/src;%s/../../etc/passwd" % (dest, dest), "v17_1_q_traversal_glued_both", True, "outside allow root")
+    return fails
+
+
+def v17_6b_invocation_record() -> int:
+    """V17-6b (review of 660c1c03): the hook writes the INVOCATION row the
+    audit pairs with the observer COMPLETION by tool_call_id -- for an allowed
+    and for a refused terminal call alike (a refused call never completes, so
+    the audit reads it as unknown). A file-editing tool call gets a "mutation" row (architect review
+    2026-09-29, G1: an edit resets the duplicate-observation comparison)."""
+    fails = 0
+    with tempfile.TemporaryDirectory() as td:
+        home = Path(td) / "home"
+        (home / "kanban" / "logs").mkdir(parents=True)
+        dest = Path(td) / "mod"
+        dest.mkdir()
+        env = {"HERMES_HOME": str(home / "profiles" / "reviewer"), "HERMES_KANBAN_TASK": "t_inv1",
+               "HERMES_KANBAN_RUN_ID": "5", "HERMES_PROFILE": "reviewer", "K2_BOUND_GATE_EXIT": "0"}
+        (home / "profiles" / "reviewer").mkdir(parents=True)
+        run("ls %s" % dest, [str(dest)], cwd=str(dest), extra_env=env, extra_payload={"extra": {"tool_call_id": "call-a"}})
+        run("cat /etc/shadow", [str(dest)], cwd=str(dest), extra_env=env, extra_payload={"extra": {"tool_call_id": "call-b"}})
+        run("", [str(dest)], cwd=str(dest), tool="write_file", extra_env=env, extra_input={"path": str(dest / "x")},
+            extra_payload={"extra": {"tool_call_id": "call-c"}})
+        run("", [str(dest)], cwd=str(dest), tool="execute_code", extra_env=env, extra_input={"code": "print(1)"},
+            extra_payload={"extra": {"tool_call_id": "call-d"}})
+        ledger = home / "kanban" / "logs" / "t_inv1.exec.jsonl"
+        rows = [json.loads(x) for x in ledger.read_text(encoding="utf-8").splitlines()] if ledger.exists() else []
+        # invocation rows only: the once-per-run preload row is a separate record (phase "preload")
+        got = [(r.get("phase"), r.get("tool_call_id"), r.get("run"), r.get("profile")) for r in rows if r.get("phase") != "preload"]
+        want = [("start", "call-a", "5", "reviewer"), ("start", "call-b", "5", "reviewer"), ("mutation", "call-c", "5", "reviewer"),
+                ("mutation", "call-d", "5", "reviewer")]
+        if got != want:
+            print("FAIL v17_6b_invocation_record", got, file=sys.stderr)
+            fails += 1
+        else:
+            print("ok v17_6b_invocation_record")
+    return fails
+
+
+def duplicate_observation_checks() -> int:
+    """Architect review 2026-09-29, G1 (replaces the v28 number-masking rule). v28 t_564dfeaa ran one read-only
+    query 213 times, each time writing its result to a newly named scratch file and reading it back. Only a
+    PROVEN duplicate observation is refused: the same recognized read-only query, differing only in its scratch
+    file name, four times in a row with known exits and equal complete outputs. The five counterexamples the
+    review reproduced against the number-masking rule, and every unproven variant, are allowed."""
+    import hashlib
+    fails = 0
+
+    def case(name, prior, current, want_block, *, run_id="46", other_run=False, exit_code=0, fields=True,
+             mutation_after=None, quote=""):
+        nonlocal fails
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td) / "home"
+            (home / "kanban" / "logs").mkdir(parents=True)
+            dest = Path(td) / "mod"
+            (dest / "verification").mkdir(parents=True)
+            (dest / "src").mkdir(parents=True)
+            rows = []
+            for i, (cmd, out) in enumerate(prior):
+                cmd, out = cmd.replace("DEST", str(dest)), out.replace("DEST", str(dest))
+                base = {"task": "t_nr", "run": "45" if other_run else run_id, "tool_call_id": "c%d" % i}
+                rows.append(dict(base, phase="start", command=cmd))
+                end = dict(base, phase="end", command=cmd, exit_code=exit_code)
+                if fields:
+                    end.update(output_tail=out[-800:], output_chars=len(out),
+                               output_sha256=hashlib.sha256(out.encode()).hexdigest())
+                rows.append(end)
+                if mutation_after == i:
+                    rows.append(dict(base, phase="mutation", tool_call_id="m%d" % i, tool="write_file",
+                                     path=str(dest / "src" / "A.java")))
+            (home / "kanban" / "logs" / "t_nr.exec.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+            env = {"HERMES_HOME": str(home), "HERMES_KANBAN_TASK": "t_nr", "HERMES_KANBAN_RUN_ID": run_id,
+                   "HERMES_PROFILE": "implementer", "K2_BOUND_GATE_EXIT": "0", "HERMES_WRITE_SAFE_ROOT": str(dest)}
+            r = run(current.replace("DEST", str(dest)), [str(dest)], cwd=str(dest), extra_env=env,
+                    extra_payload={"extra": {"tool_call_id": "now"}})
+            got = r.get("action") == "block" and "DUPLICATE_OBSERVATION" in str(r.get("message"))
+            if got != want_block:
+                print("FAIL duplicate_observation %s: %s" % (name, r), file=sys.stderr)
+                fails += 1
+            elif want_block and quote and quote not in str(r.get("message")):
+                print("FAIL duplicate_observation %s: the known answer is not quoted: %s" % (name, r), file=sys.stderr)
+                fails += 1
+
+    # the v28 shape: one query, a renamed scratch file under the run state, the name echoed in the output
+    q = "cat DEST/verification/diag.json | grep -o Transactional > DEST/verification/txn_clinic_full%d.txt; wc -c DEST/verification/txn_clinic_full%d.txt"
+    v28 = [(q % (n, n), "12600 DEST/verification/txn_clinic_full%d.txt" % n) for n in range(1, 5)]
+    case("v28-shape", v28, q % (5, 5), True, quote="12600")
+    tmpq = "grep -c Transactional DEST/src/A.java > /tmp/cnt%d.txt; cat /tmp/cnt%d.txt"
+    case("tmp-scratch", [(tmpq % (n, n), "31\n") for n in range(1, 5)], tmpq % (5, 5), True, quote="31")
+    teeq = "grep -n delete DEST/src/A.java | tee /tmp/del%d.txt"
+    case("tee-scratch", [(teeq % n, "12: void delete()\n") for n in range(1, 5)], teeq % 5, True)
+    # the five counterexamples the review reproduced
+    case("different-files", [("cat DEST/src/Part%d.java" % n, "class Part%d {}" % n) for n in range(1, 5)],
+         "cat DEST/src/Part5.java", False)
+    fq = "cat DEST/src/Part%d.java > /tmp/p%d.txt; cat /tmp/p%d.txt"
+    case("different-files-with-scratch", [(fq % (n, n, n), "class Part {}") for n in range(1, 5)], fq % (5, 5, 5), False)
+    big = "x" * 900
+    case("growing-past-the-tail", [("grep -B%d void DEST/src/A.java" % (10 * n), "l" * (100 * n) + big) for n in range(1, 5)],
+         "grep -B50 void DEST/src/A.java", False)
+    gq = "grep -B40 void DEST/src/A.java > /tmp/w%d.txt; cat /tmp/w%d.txt"
+    case("same-tail-different-whole", [(gq % (n, n), "l" * (100 * n) + big) for n in range(1, 5)], gq % (5, 5), False)
+    cq = "grep -c err DEST/verification/diag.json > /tmp/c%d.txt; cat /tmp/c%d.txt"
+    case("changing-counts", [(cq % (n, n), "%d\n" % (60 - 10 * n)) for n in range(1, 5)], cq % (5, 5), False)
+    case("product-touch", [("touch DEST/src/Part%d.java" % n, "") for n in range(1, 5)], "touch DEST/src/Part5.java", False)
+    wq = "echo x > DEST/src/Part%d.java"
+    case("product-redirect", [(wq % n, "") for n in range(1, 5)], wq % 5, False)
+    case("unknown-exit", v28, q % (5, 5), False, exit_code=None)
+    # further controls: fewer calls, another run, an exact repeat, an edit between, a partial record, an unknown shape
+    case("three-prior", v28[1:], q % (5, 5), False)
+    case("another-run", v28, q % (5, 5), False, other_run=True)
+    case("exact-repeat-is-the-runtime-guard", [(q % (1, 1), "12600 DEST/verification/txn_clinic_full1.txt")] * 4, q % (1, 1), False)
+    case("edit-between-resets", v28, q % (5, 5), False, mutation_after=1)
+    case("partial-record", v28, q % (5, 5), False, fields=False)
+    pq = "python3 -c print > /tmp/py%d.txt; cat /tmp/py%d.txt"
+    case("unrecognized-shape", [(pq % (n, n), "ok") for n in range(1, 5)], pq % (5, 5), False)
+    if not fails:
+        print("ok duplicate_observation_checks")
+    return fails
+
+
+def pilot_confinement_checks() -> int:
+    """PARALLEL-M3-PILOT.md: a pair task (dispatcher env names a worktree under <dest>/.worktrees/ on a wt/m3-
+    branch) writes only inside its worktree and runs its loop tools there; a serial task is unchanged."""
+    fails = 0
+    with tempfile.TemporaryDirectory() as td:
+        dest = Path(td) / "modernized"
+        wt, sib = dest / ".worktrees" / "m3-aaaaaaaaaaaa", dest / ".worktrees" / "m3-bbbbbbbbbbbb"
+        for d in (dest / "src", wt / "src", sib / "src"):
+            d.mkdir(parents=True)
+        roots = [str(dest)]
+        pilot = {"HERMES_WRITE_SAFE_ROOT": str(dest), "HERMES_KANBAN_WORKSPACE": str(wt), "HERMES_KANBAN_BRANCH": "wt/m3-aaaaaaaaaaaa",
+                 "HERMES_PROFILE": "implementer", "K2_BOUND_GATE_EXIT": "0"}
+        serial = {"HERMES_WRITE_SAFE_ROOT": str(dest), "HERMES_PROFILE": "implementer", "K2_BOUND_GATE_EXIT": "0"}
+
+        def confined(cmd, env, cwd, want):
+            nonlocal fails
+            r = run(cmd, roots, cwd=str(cwd), extra_env=env)
+            got = r.get("action") == "block" and "PILOT_CONFINED" in str(r.get("message"))
+            if got != want:
+                print("FAIL pilot_confinement %r: %s" % (cmd, r), file=sys.stderr)
+                fails += 1
+
+        confined("echo x > %s/src/A.java" % wt, pilot, wt, False)
+        confined("echo x > %s/src/A.java" % dest, pilot, wt, True)
+        confined("echo x > %s/src/A.java" % sib, pilot, wt, True)
+        confined("cd %s && python3 .hermes/skills/migration/fix-until-green/scripts/brief.py --root ." % dest, pilot, wt, True)
+        confined("python3 .hermes/skills/migration/fix-until-green/scripts/brief.py --root %s" % wt, pilot, wt, False)
+        confined("python3 .hermes/skills/migration/fix-until-green/scripts/brief.py --root .", pilot, wt, False)
+        confined("echo x > %s/src/A.java" % dest, serial, dest, False)
+        # a workspace that merely looks like a worktree but is not on a pilot branch is not a pilot task
+        confined("echo x > %s/src/A.java" % dest, dict(pilot, HERMES_KANBAN_BRANCH="feature/x"), wt, False)
+    if not fails:
+        print("ok pilot_confinement_checks")
+    return fails
+
+
+if __name__ == "__main__":
+    raise SystemExit(main() + v17_1_qualification() + v17_6b_invocation_record() + duplicate_observation_checks() + pilot_confinement_checks())
